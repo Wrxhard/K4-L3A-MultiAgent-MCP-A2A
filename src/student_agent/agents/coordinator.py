@@ -82,3 +82,14 @@ def make_order_item_task(case: NormalizedCase) -> AgentTask:
         entity_ids=(case.claimed_order_id,),
         required_fact_codes=("ORDER_STATUS", "ORDER_ITEM_IDS", "SELLER_IDS"),
     )
+
+
+def make_payment_task(case: NormalizedCase) -> AgentTask:
+    return AgentTask(
+        task_id=f"{case.case_id}-payment-1",
+        case_id=case.case_id,
+        actor="payment-agent",
+        objective="Verify payment totals, transaction structure, and refund lifecycle",
+        entity_ids=(case.claimed_order_id,),
+        required_fact_codes=("PAYMENT_TOTAL_BRL", "PAYMENT_COUNT", "PAYMENT_REFERENCES"),
+    )

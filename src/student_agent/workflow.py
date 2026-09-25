@@ -4,10 +4,12 @@ from typing import Any
 
 from .agents import (
     Gateway,
-    build_order_only_draft,
+    build_rules_draft,
     draft_to_output,
     investigate_order_items,
+    investigate_payments,
     make_order_item_task,
+    make_payment_task,
     normalize_case,
     verify_draft,
 )
@@ -40,7 +42,28 @@ async def solve_case(
         trace=lifecycle,
     )
     lifecycle.handoff(report)
-    draft = build_order_only_draft(normalized, report)
+    expected_total = next(
+        (
+            fact.value
+            for fact in report.facts
+            if fact.fact_code == "ORDER_EXPECTED_TOTAL_BRL"
+        ),
+        None,
+    )
+    payment_task = make_payment_task(normalized)
+    lifecycle.task_assigned(payment_task)
+    payment_report = await investigate_payments(
+        payment_task,
+        order_id=normalized.claimed_order_id,
+        claim_topics=tuple(claim.topic for claim in normalized.claims),
+        expected_total_brl=expected_total,
+        gateway=gateway,
+        catalog=catalog,
+        registry=registry,
+        trace=lifecycle,
+    )
+    lifecycle.handoff(payment_report)
+    draft = build_rules_draft(normalized, (report, payment_report))
     verification = verify_draft(
         draft,
         expected_case_id=normalized.case_id,

@@ -39,6 +39,24 @@ class FakeGateway:
                 ],
                 "b",
             ),
+            "get_payment_timeline": envelope(
+                "ev_payment_abcdefghijklmnopqrstuvwxyz",
+                "payment",
+                {
+                    "order_id": "order-1",
+                    "payments": [
+                        {
+                            "order_id": "order-1",
+                            "payment_reference": "payment-1",
+                            "payment_type": "credit_card",
+                            "payment_installments": 1,
+                            "payment_value": "110.00",
+                        }
+                    ],
+                    "events": [],
+                },
+                "c",
+            ),
         }
 
     async def call(
@@ -155,11 +173,14 @@ def test_solve_case_runs_end_to_end_with_fake_boundaries() -> None:
     output = asyncio.run(solve_case(input_case(), gateway, sink))
 
     assert output["case_id"] == "CASE_001"
-    assert output["assessment"]["primary_issue"] == "insufficient_evidence"
+    assert output["assessment"]["primary_issue"] == "canceled_order_paid"
     assert [event["event_type"] for event in sink.events] == [
         "case_received",
         "task_assigned",
         "tool_result_consumed",
+        "tool_result_consumed",
+        "handoff",
+        "task_assigned",
         "tool_result_consumed",
         "handoff",
         "verification_completed",

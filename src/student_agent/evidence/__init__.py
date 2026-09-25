@@ -1,4 +1,5 @@
 from .adapters import EvidenceAdapterError, adapt_evidence
+from .errors import EvidenceToolError
 from .registry import EvidenceRegistry, EvidenceRegistryError
 from .tool_catalog import (
     DEFAULT_TOOL_SPECS,
@@ -20,6 +21,7 @@ __all__ = [
     "EvidenceAdapterError",
     "EvidenceRegistry",
     "EvidenceRegistryError",
+    "EvidenceToolError",
     "ToolCatalog",
     "ToolCatalogError",
     "ToolSpec",

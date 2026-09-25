@@ -10,6 +10,7 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
 from .contracts import Contracts
+from .evidence import EvidenceToolError
 
 
 class EvidenceGateway:
@@ -28,7 +29,16 @@ class EvidenceGateway:
             message = " ".join(
                 block.text for block in result.content if getattr(block, "text", None)
             )
-            raise RuntimeError(f"MCP tool {tool_name} failed: {message or 'unknown error'}")
+            normalized = message.casefold()
+            not_found = any(
+                marker in normalized
+                for marker in ("not found", "no refund record", "does not exist")
+            )
+            raise EvidenceToolError(
+                tool_name,
+                message or "unknown error",
+                not_found=not_found,
+            )
         evidence = getattr(result, "structuredContent", None)
         if evidence is None:
             evidence = getattr(result, "structured_content", None)

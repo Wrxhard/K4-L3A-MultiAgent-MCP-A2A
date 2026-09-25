@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from decimal import Decimal
 from typing import Any, Protocol
 
 from student_agent.domain import (
     AgentTask,
     EvidenceSource,
     Fact,
+    InvariantError,
     SpecialistReport,
     TaskStatus,
+    parse_decimal,
 )
 from student_agent.evidence import (
     ORDER_ITEM_AGENT,
@@ -34,6 +37,23 @@ def _unique_text(rows: list[Any], key: str) -> tuple[str, ...]:
             if isinstance(value, str) and value and value not in values:
                 values.append(value)
     return tuple(values)
+
+
+def _expected_total(rows: list[Any]) -> Decimal | None:
+    total = Decimal("0")
+    found = False
+    for index, row in enumerate(rows):
+        if not isinstance(row, Mapping):
+            continue
+        for key in ("price", "freight_value"):
+            value = row.get(key)
+            if value is not None:
+                try:
+                    total += parse_decimal(value, field_name=f"items[{index}].{key}")
+                except InvariantError as exc:
+                    raise EvidenceAdapterError(str(exc)) from exc
+                found = True
+    return total if found else None
 
 
 def _fact(
@@ -104,6 +124,7 @@ async def investigate_order_items(
                 raise EvidenceAdapterError("get_order_items data must be an array")
             item_ids = _unique_text(record.data, "order_item_id")
             seller_ids = _unique_text(record.data, "seller_id")
+            expected_total = _expected_total(record.data)
             if item_ids:
                 facts.append(
                     _fact(
@@ -120,6 +141,16 @@ async def investigate_order_items(
                         task=task,
                         code="SELLER_IDS",
                         value=seller_ids,
+                        evidence_ref=record.evidence_ref,
+                        entity_id=order_id,
+                    )
+                )
+            if expected_total is not None:
+                facts.append(
+                    _fact(
+                        task=task,
+                        code="ORDER_EXPECTED_TOTAL_BRL",
+                        value=expected_total,
                         evidence_ref=record.evidence_ref,
                         entity_id=order_id,
                     )
