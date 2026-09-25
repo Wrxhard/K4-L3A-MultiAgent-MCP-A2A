@@ -3,10 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from student_agent.agents.coordinator import NormalizedCase
 from student_agent.domain import CandidateSet, SpecialistReport
+
+if TYPE_CHECKING:
+    from student_agent.agents.coordinator import NormalizedCase
 
 SAFE_FACT_CODES = frozenset(
     {
