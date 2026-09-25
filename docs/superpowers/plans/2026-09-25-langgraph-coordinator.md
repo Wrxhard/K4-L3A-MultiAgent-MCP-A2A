@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the coordinator-only LangGraph workflow that retains structured agent context, assembles the L3A candidate output, and executes bounded task recovery and verifier-directed semantic retries.
+**Goal:** Build the LangGraph Coordinator and deterministic Verifier that retain structured agent context, assemble and validate the L3A candidate output, and execute bounded task recovery and verifier-directed semantic retries.
 
 **Architecture:** A compiled LangGraph `StateGraph` owns the case lifecycle while concrete team agents are injected as LangChain `Runnable[AgentTask, AgentResult]` values. The graph runs Order/Item first, Payment and Shipment concurrently, Policy next, then assembly and verification; a dedicated retry node reruns only the target and its downstream dependants.
 
@@ -12,7 +12,10 @@
 
 ## Global Constraints
 
-- Implement coordinator orchestration only; do not implement Order/Item, Payment, Shipment, Policy, or Verifier domain logic.
+- Implement Coordinator orchestration and deterministic Verifier checks; do not
+  implement Order/Item, Payment, Shipment, or Policy domain logic.
+- Keep semantic model review optional through an injected LangChain Runnable;
+  do not select a provider, model, prompt, or API credential in this scope.
 - Do not create or infer `evidence_ref` values.
 - Do not store prompts, chain-of-thought, raw MCP bodies, secrets, or raw exception text in state or trace.
 - Local MCP/model retries remain inside team agent runnables; coordinator recovers only `AGENT_TIMEOUT`, `AGENT_CRASHED`, and `AGENT_NO_RESPONSE`.
@@ -26,8 +29,8 @@
 - Empty or non-string `case_id` must fail with `INVALID_CASE` before any runnable is invoked; covered in Task 2.
 - A completed result whose payload class does not match its actor must fail with `INVALID_AGENT_RESULT`; covered in Task 1.
 - An agent-provided `safe_detail` containing a team-key pattern must be rejected and never enter verification state; covered in Task 1.
-- Verifier `passed` with no candidate output must fail with `INVALID_VERIFIER_REPORT`; covered in Task 3.
-- A locally exhausted MCP error must reach Verifier but must not trigger coordinator task recovery; covered in Task 3.
+- Verifier `passed` with no candidate output must fail with `INVALID_VERIFIER_REPORT`; covered in Task 4.
+- A locally exhausted MCP error must reach Verifier but must not trigger coordinator task recovery; covered in Task 4.
 
 ---
 
@@ -35,13 +38,17 @@
 
 - Create `src/student_agent/agent_contracts.py`: immutable cross-team task/result/payload contracts, validation helpers, and `AgentRegistry`.
 - Create `src/student_agent/coordinator.py`: mutable per-case state, LangGraph construction, agent invocation/recovery, candidate assembly, retry routing, and coordinator exceptions.
+- Create `src/student_agent/verifier.py`: deterministic invariants, actor-targeted
+  reports, optional semantic Runnable chaining, and a Runnable adapter.
 - Modify `src/student_agent/workflow.py`: public entry point delegating to `Coordinator` when a registry is provided.
 - Modify `pyproject.toml`: declare LangGraph and LangChain runtime dependencies.
 - Create `tests/test_agent_contracts.py`: contract and sanitization behavior.
 - Create `tests/__init__.py` and `tests/coordinator_fakes.py`: shared deterministic runnables used only by coordinator/workflow tests.
 - Create `tests/test_coordinator.py`: graph order, candidate assembly, failure context, retries, invalidation, and limits.
+- Create `tests/test_verifier.py`: deterministic checks, ownership-aware retry
+  reports, terminal merge failures, and optional semantic review.
 - Create `tests/test_workflow.py`: public adapter behavior and real trace-schema integration.
-- Create `docs/team-agent-implementation-guide.md`: exact integration contract and Superpowers/TDD handoff for Nam, Dat, and Huy.
+- Create `docs/team-agent-implementation-guide.md`: exact integration contract and Superpowers/TDD handoff for Nam and Dat, plus instructions for using the built-in Verifier.
 
 ### Task 1: Typed cross-team contracts
 
@@ -53,7 +60,7 @@
 
 **Interfaces:**
 
-- Produces: `Actor`, `AgentStatus`, `VerificationVerdict`, `EntitySet`, `Observation`, `ToolCallSummary`, `OrderItemPayload`, `PaymentPayload`, `ShipmentPayload`, `PolicyPayload`, `AgentFeedback`, `AgentTask`, `AgentResult`, `VerificationPackage`, `VerificationReport`, `AgentRegistry`, and `validate_agent_result(task, result)`.
+- Produces: `Actor`, `AgentStatus`, `VerificationVerdict`, `EntitySet`, `Observation`, `ToolCallSummary`, `OrderItemPayload`, `PaymentPayload`, `ShipmentPayload`, `PolicyPayload`, `AgentFeedback`, `AgentTask`, `AgentResult`, `VerificationPackage`, `VerificationReport`, `AgentRegistry`, `validate_agent_result(task, result)`, and `validate_verification_report(report)`.
 - Consumes: LangChain `Runnable[AgentTask, AgentResult]` and `Runnable[VerificationPackage, VerificationReport]`.
 
 - [ ] **Step 1: Add the runtime dependencies and write failing contract tests**
@@ -85,6 +92,7 @@ from student_agent.agent_contracts import (
     VerificationPackage,
     VerificationReport,
     validate_agent_result,
+    validate_verification_report,
 )
 
 
@@ -123,6 +131,19 @@ def test_failed_result_rejects_secret_in_safe_detail() -> None:
             retryable=True,
             safe_detail="sk-team-1234567890abcdef leaked",
         )
+
+
+def test_retry_report_requires_a_known_actor() -> None:
+    report = VerificationReport(
+        verdict="retry_required",
+        target_actor="unknown-agent",
+        error_code="BAD_TARGET",
+        feedback="Unknown retry target",
+        retryable=True,
+    )
+
+    with pytest.raises(ValueError, match="target_actor"):
+        validate_verification_report(report)
 
 
 def test_registry_returns_the_runnable_for_each_actor() -> None:
@@ -296,6 +317,11 @@ class VerificationReport:
 ```
 
 Implement `AgentResult.completed(...)` and `AgentResult.failed(...)` class methods so callers cannot accidentally combine a completed payload with failure fields. Implement `VerificationReport.passed()`, `VerificationReport.retry(target_actor, error_code, feedback)`, and `VerificationReport.failed(error_code, feedback)` constructors. Reject duplicate IDs/evidence refs, non-positive invocation/context versions, negative retry counts, `safe_detail` longer than 160 characters, and the existing `sk-team-...` secret pattern.
+
+`validate_verification_report` enforces: `passed` has no target/error/feedback and
+is not retryable; `retry_required` has a valid Actor target, non-empty
+error/feedback, and is retryable; `failed` has no target, has non-empty
+error/feedback, and is not retryable.
 
 Define `AgentRegistry` with four agent runnables and one verifier runnable:
 
@@ -699,7 +725,273 @@ git add src/student_agent/coordinator.py tests/__init__.py tests/coordinator_fak
 git commit -m "feat: add LangGraph coordinator happy path"
 ```
 
-### Task 3: Failure context, recovery, and verifier-directed retry
+### Task 3: Deterministic Verifier and optional semantic review
+
+**Files:**
+
+- Create: `src/student_agent/verifier.py`
+- Create: `tests/test_verifier.py`
+
+**Interfaces:**
+
+- Consumes: `Contracts`, `VerificationPackage`, `VerificationReport`, active
+  role-specific payloads, and optional
+  `Runnable[VerificationPackage, VerificationReport]`.
+- Produces: `DeterministicVerifier.verify(package)`,
+  `DeterministicVerifier.as_runnable()`, and stable verifier error codes.
+
+- [ ] **Step 1: Write failing tests for the valid path and Policy-owned errors**
+
+Create `tests/test_verifier.py`. Build a valid candidate with the same values as
+`completed_policy_result` and a package whose active results come from the four
+passing helpers in `tests/coordinator_fakes.py`.
+
+```python
+from __future__ import annotations
+
+import asyncio
+from copy import deepcopy
+from pathlib import Path
+
+from langchain_core.runnables import RunnableLambda
+
+from student_agent.agent_contracts import (
+    AgentResult,
+    AgentTask,
+    VerificationPackage,
+    VerificationReport,
+)
+from student_agent.contracts import Contracts
+from student_agent.verifier import DeterministicVerifier
+from tests.coordinator_fakes import (
+    completed_order_result,
+    completed_payment_result,
+    completed_policy_result,
+    completed_shipment_result,
+)
+
+
+def contracts() -> Contracts:
+    root = Path(__file__).resolve().parents[1]
+    return Contracts(root / "contracts" / "schemas")
+
+
+def task(actor: str) -> AgentTask:
+    return AgentTask(
+        case_id="CASE_001",
+        actor=actor,
+        invocation=1,
+        context_version=1,
+        retry_count_for_context=0,
+        case={"case_id": "CASE_001"},
+        context={},
+        feedback=None,
+    )
+
+
+def active_results() -> dict[str, AgentResult]:
+    return {
+        "order_item": completed_order_result(task("order_item")),
+        "payment": completed_payment_result(task("payment")),
+        "shipment": completed_shipment_result(task("shipment")),
+        "policy": completed_policy_result(task("policy")),
+    }
+
+
+def valid_candidate() -> dict[str, object]:
+    results = active_results()
+    policy = results["policy"].payload
+    return {
+        "schema_version": "day09-l3a-output-v2",
+        "case_id": "CASE_001",
+        "assessment": dict(policy.assessment),
+        "affected_entities": {
+            "order_ids": ["ORDER_1"],
+            "item_ids": ["ITEM_1"],
+            "seller_ids": ["SELLER_1"],
+            "payment_references": ["PAYMENT_1"],
+            "shipment_ids": ["SHIPMENT_1"],
+        },
+        "root_cause_analysis": dict(policy.root_cause_analysis),
+        "evidence_refs": [
+            "ev_order000000000000000001",
+            "ev_payment0000000000000001",
+            "ev_shipment000000000000001",
+            "ev_policy00000000000000001",
+        ],
+        "data_conflicts": list(policy.data_conflicts),
+        "financial_resolution": dict(policy.financial_resolution),
+        "resolution_actions": list(policy.resolution_actions),
+    }
+
+
+def package(candidate: dict[str, object] | None) -> VerificationPackage:
+    active = active_results()
+    return VerificationPackage(
+        case_id="CASE_001",
+        verification_round=1,
+        candidate_output=candidate,
+        attempt_history={actor: (result,) for actor, result in active.items()},
+        active_results=active,
+        unresolved_failures=(),
+    )
+
+
+def test_valid_candidate_passes_deterministic_verification() -> None:
+    report = asyncio.run(
+        DeterministicVerifier(contracts()).verify(package(valid_candidate()))
+    )
+    assert report == VerificationReport.passed()
+
+
+def test_refund_total_mismatch_targets_policy() -> None:
+    candidate = deepcopy(valid_candidate())
+    candidate["financial_resolution"]["recommended_refund_brl"] = 11.0
+
+    report = asyncio.run(DeterministicVerifier(contracts()).verify(package(candidate)))
+
+    assert report.verdict == "retry_required"
+    assert report.target_actor == "policy"
+    assert report.error_code == "REFUND_TOTAL_MISMATCH"
+```
+
+Add separate tests for `CLAIM_EVIDENCE_MISMATCH`,
+`INVALID_CONFLICT_SELECTION`, and `DUPLICATE_ROOT_CAUSE_RANK`, each asserting a
+retryable Policy report. Include the invalid candidate data directly in each
+test so failures identify the exact invariant.
+
+- [ ] **Step 2: Run Verifier tests and confirm RED**
+
+Run:
+
+```powershell
+pytest -q tests/test_verifier.py
+```
+
+Expected: collection fails because `student_agent.verifier` does not exist.
+
+- [ ] **Step 3: Implement deterministic invariant checks**
+
+Create `src/student_agent/verifier.py`:
+
+```python
+POLICY_SCHEMA_FIELDS = {
+    "assessment",
+    "claim_assessments",
+    "root_cause_analysis",
+    "data_conflicts",
+    "financial_resolution",
+    "resolution_actions",
+}
+
+
+class DeterministicVerifier:
+    def __init__(
+        self,
+        contracts: Contracts,
+        semantic_verifier: Runnable[VerificationPackage, VerificationReport] | None = None,
+    ) -> None:
+        self._contracts = contracts
+        self._semantic_verifier = semantic_verifier
+
+    def as_runnable(self) -> Runnable[VerificationPackage, VerificationReport]:
+        return RunnableLambda(self.verify)
+
+    async def verify(self, package: VerificationPackage) -> VerificationReport:
+        # Run checks in the exact order described below.
+```
+
+Implement checks in this order so one run produces a stable first failure:
+
+1. First unresolved failure in actor order `order_item`, `payment`, `shipment`,
+   `policy`: retry its actor only when `retryable` is true and
+   `retry_count_for_context < 1`; otherwise return terminal
+   `AGENT_FAILURE_NOT_RECOVERABLE`.
+2. Missing candidate: terminal `CANDIDATE_MISSING`.
+3. Candidate `case_id` mismatch: terminal `CASE_ID_MISMATCH`.
+4. `Contracts.validate_output`: parse the location before the second colon in
+   `ContractError`; Policy-owned top-level fields target Policy with
+   `POLICY_OUTPUT_SCHEMA_INVALID`, while envelope/merge fields return terminal
+   `CANDIDATE_SCHEMA_INVALID`.
+5. Ordered evidence union mismatch: terminal `EVIDENCE_MERGE_MISMATCH`.
+6. Ordered specialist-entity union mismatch: terminal `ENTITY_MERGE_MISMATCH`.
+7. Claim evidence outside top-level evidence: Policy retry
+   `CLAIM_EVIDENCE_MISMATCH`.
+8. Decimal sum of refund lines differs from recommended refund: Policy retry
+   `REFUND_TOTAL_MISMATCH`.
+9. Selected conflict source is non-null and absent from sources: Policy retry
+   `INVALID_CONFLICT_SELECTION`.
+10. Duplicate root-cause rank: Policy retry `DUPLICATE_ROOT_CAUSE_RANK`.
+11. Optional semantic runnable; validate its report with
+    `validate_verification_report` and return it.
+12. Otherwise return `VerificationReport.passed()`.
+
+Use `Decimal(str(value))` for money. Use common helpers `_policy_retry(...)` and
+`_terminal_failure(...)` so every report has the exact constructor invariants
+from Task 1.
+
+- [ ] **Step 4: Write failing tests for terminal ownership and semantic chaining**
+
+Add these tests:
+
+```python
+def test_coordinator_owned_evidence_merge_error_is_terminal() -> None:
+    candidate = valid_candidate()
+    candidate["evidence_refs"] = candidate["evidence_refs"][:-1]
+
+    report = asyncio.run(DeterministicVerifier(contracts()).verify(package(candidate)))
+
+    assert report.verdict == "failed"
+    assert report.target_actor is None
+    assert report.error_code == "EVIDENCE_MERGE_MISMATCH"
+
+
+def test_semantic_verifier_runs_only_after_deterministic_checks_pass() -> None:
+    calls: list[VerificationPackage] = []
+
+    async def semantic(value: VerificationPackage) -> VerificationReport:
+        calls.append(value)
+        return VerificationReport.retry(
+            "policy",
+            "RESPONSIBILITY_ACTION_MISMATCH",
+            "Recheck responsible party and resolution actions",
+        )
+
+    verifier = DeterministicVerifier(
+        contracts(), semantic_verifier=RunnableLambda(semantic)
+    )
+    report = asyncio.run(verifier.verify(package(valid_candidate())))
+
+    assert len(calls) == 1
+    assert report.error_code == "RESPONSIBILITY_ACTION_MISMATCH"
+```
+
+Add one test with an invalid deterministic candidate and the same semantic
+handler, asserting `calls == []`. Add one test where the semantic runnable
+returns an invalid retry target and assert `ValueError` from
+`validate_verification_report`.
+
+- [ ] **Step 5: Run Verifier tests, full suite, and Ruff**
+
+Run:
+
+```powershell
+pytest -q tests/test_verifier.py
+pytest -q
+ruff check src tests
+```
+
+Expected: deterministic, terminal-ownership, and semantic-chain tests pass; the
+existing suite stays green; Ruff exits zero.
+
+- [ ] **Step 6: Commit Task 3**
+
+```powershell
+git add src/student_agent/verifier.py tests/test_verifier.py
+git commit -m "feat: add deterministic output verifier"
+```
+
+### Task 4: Failure context, recovery, and verifier-directed retry
 
 **Files:**
 
@@ -860,14 +1152,14 @@ ruff check src tests
 
 Expected: all recovery, semantic retry, invalidation, safety, and pre-existing tests pass.
 
-- [ ] **Step 8: Commit Task 3**
+- [ ] **Step 8: Commit Task 4**
 
 ```powershell
 git add src/student_agent/coordinator.py tests/test_coordinator.py
 git commit -m "feat: add bounded coordinator retry routing"
 ```
 
-### Task 4: Public workflow adapter, trace verification, and team handoff
+### Task 5: Public workflow adapter, trace verification, and team handoff
 
 **Files:**
 
@@ -1018,7 +1310,10 @@ Create `docs/team-agent-implementation-guide.md` in Vietnamese with:
 - context-version/recomputation rules;
 - completed and failed `AgentResult` examples;
 - passed, retry, and failed `VerificationReport` examples;
-- a checklist for Nam, Dat, and Huy to run Superpowers brainstorming, approve their role design, use TDD, and run the complete test suite before handoff.
+- a checklist for Nam and Dat to run Superpowers brainstorming, approve their
+  role design, use TDD, and run the complete test suite before handoff;
+- instructions for enabling the built-in deterministic Verifier and optionally
+  injecting a semantic review Runnable.
 
 Replace the unfinished coordinator sections in `ARCHITECTURE.md` with the finalized coordinator flow, actor ownership, retry table, observable trace rules, and loop limits. Do not document prompts or private reasoning.
 
@@ -1047,7 +1342,7 @@ rg -n "sk-team-[A-Za-z0-9_-]{16,128}" src tests docs ARCHITECTURE.md
 
 Expected: diff check is clean; changes are limited to coordinator contracts/orchestration/tests/docs; the secret scan finds only deliberate test placeholders or documentation warnings and no real credential.
 
-- [ ] **Step 7: Commit Task 4**
+- [ ] **Step 7: Commit Task 5**
 
 ```powershell
 git add src/student_agent/workflow.py src/student_agent/coordinator.py tests/test_workflow.py docs/team-agent-implementation-guide.md ARCHITECTURE.md

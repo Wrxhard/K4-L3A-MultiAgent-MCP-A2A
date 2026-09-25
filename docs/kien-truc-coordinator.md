@@ -20,10 +20,9 @@ Coordinator không tự suy luận nghiệp vụ và không tạo evidence giả
 
 | Thành phần | Người phụ trách | Trách nhiệm |
 | --- | --- | --- |
-| Coordinator | Người triển khai coordinator | Điều phối, lưu state, retry và dựng output |
+| Coordinator + Verifier | Người triển khai coordinator | Điều phối, dựng output, kiểm tra và retry |
 | Order/Item, Payment, Shipment | Nam | Thu thập dữ kiện và evidence theo domain |
 | Policy | Anh Đạt | Áp dụng policy và đưa ra quyết định nghiệp vụ |
-| Verifier | Huy | Kiểm tra output, evidence và yêu cầu retry |
 
 ## Luồng chính
 
@@ -47,6 +46,26 @@ Verifier kiểm tra
 
 Trong LangGraph, luồng được chia thành các node `order_item`,
 `payment_and_shipment`, `policy`, `assemble`, `verify` và `retry_target`.
+
+## Verifier được implement trong scope này
+
+Verifier mặc định kiểm tra bằng code deterministic:
+
+- output đúng JSON Schema và đúng `case_id`;
+- evidence trong output khớp evidence từ active agent results;
+- affected entities khớp dữ kiện specialist;
+- evidence của từng claim thuộc evidence chung của case;
+- tổng `refund_lines` bằng `recommended_refund_brl`;
+- `selected_source` của data conflict nằm trong danh sách source;
+- rank của root cause không trùng;
+- agent failure còn retry được hay đã hết khả năng phục hồi.
+
+Lỗi thuộc các field quyết định nghiệp vụ sẽ target `policy`. Lỗi thuộc envelope
+hoặc merge của Coordinator sẽ dừng workflow thay vì retry nhầm agent.
+
+Sau khi toàn bộ deterministic check pass, có thể gắn thêm một LangChain
+`Runnable` để review semantic. Mặc định không có semantic model nên workflow vẫn
+chạy được mà không cần API/model provider.
 
 Order/Item chạy trước vì Payment và Shipment có thể cần `order_id`, `item_id`,
 `payment_reference` hoặc `shipment_id` đã được xác nhận.

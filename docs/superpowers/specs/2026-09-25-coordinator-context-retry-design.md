@@ -8,8 +8,9 @@ fragments, give the verifier enough observable state to diagnose a failed step,
 and perform bounded retries directed by verifier feedback.
 
 The Order/Item, Payment, and Shipment agents are owned by Nam. The Policy agent
-is owned by Dat. The Verifier is owned by Huy. This change defines their shared
-interfaces but does not implement any of those agents.
+is owned by Dat. Coordinator and Verifier are implemented together in this
+scope. The change defines shared interfaces but does not implement the four
+domain agents.
 
 ## Success criteria
 
@@ -41,12 +42,14 @@ interfaces but does not implement any of those agents.
 - Verification package creation and verifier-directed retry routing.
 - Retry-limit and invalid-feedback handling.
 - Observable trace emission.
+- A deterministic Verifier implementation with an optional semantic LangChain
+  runnable extension.
 - Unit tests using deterministic fake agent callables.
 - A Markdown integration guide for the other team members.
 
 ### Excluded
 
-- Domain reasoning inside specialist, Policy, or Verifier agents.
+- Domain reasoning inside specialist or Policy agents.
 - LLM prompts, provider SDK selection, and model configuration.
 - MCP transport retry inside `EvidenceGateway`.
 - Persisting private prompts, transcripts, or chain-of-thought.
@@ -105,6 +108,43 @@ Official API references used by the implementation plan:
 - https://reference.langchain.com/python/langgraph/graph/state/StateGraph
 - https://reference.langchain.com/python/langgraph/graph/state/StateGraph/add_node
 - https://reference.langchain.com/python/langgraph/types/RetryPolicy
+
+## Verifier implementation
+
+`student_agent.verifier.DeterministicVerifier` is the production default. It
+implements checks whose expected result is reproducible from public contracts
+and coordinator state:
+
+- unresolved failed agent results and whether their owning actor is retryable;
+- candidate presence and exact `case_id` correlation;
+- validation against `l3a-output-v2.schema.json`;
+- candidate evidence references equal the ordered union of active result
+  evidence references;
+- candidate affected entities equal the ordered union of specialist entities;
+- each claim-level evidence reference belongs to candidate evidence;
+- `recommended_refund_brl` equals the sum of `refund_lines[].amount_brl`, using
+  decimal arithmetic;
+- a `data_conflicts[].selected_source` is either `null` or a member of its
+  `sources` list;
+- root-cause ranks are unique.
+
+Failures owned by Policy return `retry_required` targeting `policy` when the
+current Policy context still has semantic retry allowance. Examples include
+invalid Policy-owned schema fields, refund-total mismatch, invalid conflict
+selection, claim-evidence mismatch, and duplicate root-cause ranks.
+
+Failures in coordinator-owned envelope/merge fields (`schema_version`,
+`case_id`, `affected_entities`, or top-level `evidence_refs`) return terminal
+`failed` reports rather than retrying an unrelated agent. A non-retryable or
+locally exhausted agent failure also returns `failed`.
+
+After every deterministic check passes, Verifier may call an optional
+`Runnable[VerificationPackage, VerificationReport]` for semantic review of
+claim meaning, root-cause quality, responsibility/action consistency, and
+confidence calibration. No semantic runnable is configured by default, so the
+workflow remains reproducible and does not require a model provider. Any
+semantic report is validated by the same report contract before coordinator
+acts on it.
 
 ## Components and ownership
 
@@ -376,6 +416,14 @@ Required cases:
 - Conflicting specialist observations reach Policy and Verifier without silent
   overwrite.
 - Raw exception details do not enter verification packages or traces.
+- Deterministic Verifier passes a valid candidate without invoking a semantic
+  runnable when none is configured.
+- Deterministic Verifier targets Policy for refund totals, claim evidence,
+  conflict selection, and root-cause rank errors.
+- Deterministic Verifier returns terminal failure for coordinator-owned merge or
+  correlation errors.
+- Optional semantic review runs only after deterministic checks pass, and its
+  report is validated before retry routing.
 - Trace events validate against the public trace schema.
 
 The full existing pytest suite and Ruff checks must pass before completion.
