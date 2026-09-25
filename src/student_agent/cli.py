@@ -11,6 +11,7 @@ from .config import Settings
 from .contracts import Contracts
 from .evidence import ToolCatalog
 from .mcp_gateway import connect_gateway
+from .models import OpenAICompatibleModelClient
 from .submission import package_submission, validate_artifacts
 from .trace import TraceWriter
 from .workflow import solve_case
@@ -40,6 +41,11 @@ async def _run(root: Path) -> None:
         stale.unlink()
     trace_path.unlink(missing_ok=True)
     trace = TraceWriter(trace_path, contracts)
+    model_client = (
+        OpenAICompatibleModelClient(settings.model_api_url, settings.model_api_key)
+        if settings.model_api_url
+        else None
+    )
 
     async with connect_gateway(settings.mcp_endpoint, settings.team_api_key, contracts) as gateway:
         discovered_tools = await gateway.list_tools()
@@ -48,7 +54,13 @@ async def _run(root: Path) -> None:
         ToolCatalog().validate_discovery(discovered_tools)
         for case_id in case_set.case_ids:
             case = case_set.cases[case_id]
-            output = await solve_case(case, gateway, trace)
+            output = await solve_case(
+                case,
+                gateway,
+                trace,
+                adjudicator_client=model_client,
+                adjudicator_model_id=settings.qwen_model_id,
+            )
             contracts.validate_output(output, f"outputs/{case_id}.json")
             if output.get("case_id") != case_id:
                 raise ValueError(f"solver returned a mismatched case_id for {case_id}")

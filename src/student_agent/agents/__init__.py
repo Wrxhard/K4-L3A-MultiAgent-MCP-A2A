@@ -1,7 +1,16 @@
+from .adjudicator import (
+    QWEN_MODEL_ID,
+    AdjudicationError,
+    AdjudicationResult,
+    adjudicate,
+    fallback_decision,
+    validate_adjudication,
+)
 from .candidates import generate_candidates
 from .coordinator import (
     CaseInputError,
     NormalizedCase,
+    make_adjudicator_task,
     make_order_item_task,
     make_payment_task,
     make_policy_task,
@@ -23,17 +32,22 @@ from .verifier import verify_draft
 
 __all__ = [
     "CaseInputError",
+    "AdjudicationError",
+    "AdjudicationResult",
     "Gateway",
     "NormalizedCase",
     "PaymentAnalysis",
     "PolicyDecision",
+    "QWEN_MODEL_ID",
     "ROUTING_MATRIX",
     "RoutePlan",
     "SHIPMENT_TOPICS",
     "ShipmentAnalysis",
     "analyze_payments",
+    "adjudicate",
     "analyze_shipment",
     "evaluate_policy",
+    "fallback_decision",
     "generate_candidates",
     "build_order_only_draft",
     "build_rules_draft",
@@ -43,6 +57,7 @@ __all__ = [
     "investigate_payments",
     "investigate_policy",
     "investigate_shipment",
+    "make_adjudicator_task",
     "make_order_item_task",
     "make_payment_task",
     "make_policy_task",
@@ -50,4 +65,5 @@ __all__ = [
     "normalize_case",
     "select_verified_issue",
     "verify_draft",
+    "validate_adjudication",
 ]

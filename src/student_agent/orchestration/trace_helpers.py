@@ -149,6 +149,33 @@ class CaseTrace:
         self._handoffs.add(report.task_id)
         return event
 
+    def model_handoff(
+        self,
+        *,
+        task_id: str,
+        target: str,
+        model_id: str,
+        decision_code: str,
+        evidence_refs: tuple[str, ...],
+        attempts: int,
+    ) -> dict[str, Any]:
+        self._require_received()
+        task = self._get_task(task_id)
+        if task_id in self._handoffs:
+            raise LifecycleTraceError(f"task was already handed off: {task_id}")
+        self._evidence.validate_refs(evidence_refs, require_consumed=True)
+        event = self._sink.emit(
+            case_id=self.case_id,
+            event_type="handoff",
+            actor=task.actor,
+            target=target,
+            decision_code=decision_code,
+            evidence_refs=list(evidence_refs),
+            attributes={"task_id": task_id, "model_id": model_id, "attempts": attempts},
+        )
+        self._handoffs.add(task_id)
+        return event
+
     def verification_completed(
         self, report: VerificationReport, *, actor: str = "verifier"
     ) -> dict[str, Any]:

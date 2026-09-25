@@ -15,6 +15,7 @@ from student_agent.domain import (
     RankedCause,
     RefundLine,
     ResponsibleParty,
+    SemanticDecision,
     SpecialistReport,
 )
 
@@ -117,13 +118,21 @@ def build_rules_draft(
     case: NormalizedCase,
     reports: tuple[SpecialistReport, ...],
     candidates: CandidateSet | None = None,
+    semantic: SemanticDecision | None = None,
+    alias_to_evidence_ref: dict[str, str] | None = None,
 ) -> DraftAssessment:
     refs = _all_refs(reports)
     item_ids = _first_tuple_fact(reports, "ORDER_ITEM_IDS")
     seller_ids = _first_tuple_fact(reports, "SELLER_IDS")
     payment_references = _first_tuple_fact(reports, "PAYMENT_REFERENCES")
     shipment_ids = _first_tuple_fact(reports, "SHIPMENT_IDS")
-    issue = candidates.issues[0] if candidates is not None else select_verified_issue(case, reports)
+    issue = (
+        semantic.selected_issue
+        if semantic is not None
+        else candidates.issues[0]
+        if candidates is not None
+        else select_verified_issue(case, reports)
+    )
     sufficient = issue is not PrimaryIssue.INSUFFICIENT_EVIDENCE
     no_action = issue is PrimaryIssue.VALID_SPLIT_PAYMENT
     refund_eligible = _fact_value(reports, "POLICY_REFUND_ELIGIBLE")
@@ -138,6 +147,20 @@ def build_rules_draft(
         if sufficient
         else Decimal("0.35")
     )
+    if semantic is not None:
+        band_confidence = {
+            "high": Decimal("0.90"),
+            "medium": Decimal("0.72"),
+            "low": Decimal("0.50"),
+            "insufficient": Decimal("0.25"),
+        }[semantic.confidence_band.value]
+        confidence = min(confidence, band_confidence)
+    semantic_claims = (
+        {decision.claim_id: decision for decision in semantic.claim_decisions}
+        if semantic is not None
+        else {}
+    )
+    aliases = alias_to_evidence_ref or {}
     assessments = tuple(
         ClaimAssessment(
             claim_id=claim.claim_id,
@@ -152,6 +175,8 @@ def build_rules_draft(
                 )
                 else ClaimVerdict.UNSUPPORTED
                 if claim.topic == "requested_full_refund" and refund_eligible is False
+                else semantic_claims[claim.claim_id].verdict
+                if claim.claim_id in semantic_claims
                 else ClaimVerdict.INSUFFICIENT_EVIDENCE
             ),
             confidence=(
@@ -170,7 +195,16 @@ def build_rules_draft(
                 )
                 else Decimal("0.35")
             ),
-            evidence_refs=refs,
+            evidence_refs=(
+                tuple(
+                    aliases[alias]
+                    for alias in semantic_claims[claim.claim_id].supporting_evidence_aliases
+                    if alias in aliases
+                )
+                if claim.claim_id in semantic_claims
+                and claim.topic != "requested_full_refund"
+                else refs
+            ),
         )
         for claim in case.claims
     )

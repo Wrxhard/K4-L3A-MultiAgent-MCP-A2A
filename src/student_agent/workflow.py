@@ -3,7 +3,9 @@ from __future__ import annotations
 from typing import Any
 
 from .agents import (
+    QWEN_MODEL_ID,
     Gateway,
+    adjudicate,
     build_route_plan,
     build_rules_draft,
     draft_to_output,
@@ -12,6 +14,7 @@ from .agents import (
     investigate_payments,
     investigate_policy,
     investigate_shipment,
+    make_adjudicator_task,
     make_order_item_task,
     make_payment_task,
     make_policy_task,
@@ -26,11 +29,16 @@ from .evidence import (
     EvidenceRegistry,
     ToolCatalog,
 )
+from .models import StructuredModelClient, build_adjudication_context
 from .orchestration import CaseTrace, TraceSink
 
 
 async def solve_case(
-    case: dict[str, Any], gateway: Gateway, trace: TraceSink
+    case: dict[str, Any],
+    gateway: Gateway,
+    trace: TraceSink,
+    adjudicator_client: StructuredModelClient | None = None,
+    adjudicator_model_id: str = QWEN_MODEL_ID,
 ) -> dict[str, Any]:
     """Run the deterministic specialist workflow and build a verified case output."""
     normalized = normalize_case(case)
@@ -115,7 +123,35 @@ async def solve_case(
         )
         lifecycle.handoff(policy_report)
         reports.append(policy_report)
-    draft = build_rules_draft(normalized, tuple(reports), candidates)
+    adjudication_context = build_adjudication_context(
+        normalized,
+        candidates,
+        tuple(reports),
+    )
+    adjudicator_task = make_adjudicator_task(normalized)
+    lifecycle.task_assigned(adjudicator_task)
+    adjudication = await adjudicate(
+        case_id=normalized.case_id,
+        candidates=candidates,
+        context=adjudication_context,
+        client=adjudicator_client,
+        model_id=adjudicator_model_id,
+    )
+    lifecycle.model_handoff(
+        task_id=adjudicator_task.task_id,
+        target="output-builder",
+        model_id=adjudicator_model_id,
+        decision_code=adjudication.decision_code,
+        evidence_refs=adjudication.evidence_refs,
+        attempts=adjudication.attempts,
+    )
+    draft = build_rules_draft(
+        normalized,
+        tuple(reports),
+        candidates,
+        adjudication.decision,
+        adjudication_context.alias_to_evidence_ref,
+    )
     verification = verify_draft(
         draft,
         expected_case_id=normalized.case_id,

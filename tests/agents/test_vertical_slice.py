@@ -110,6 +110,35 @@ class FakeTraceSink:
         return event
 
 
+class ValidAdjudicatorClient:
+    async def generate_json(self, **request: Any) -> dict[str, Any]:
+        payload = request["payload"]
+        selected = payload["candidate_issues"][0]
+        fact_codes = list(dict.fromkeys(fact["fact_code"] for fact in payload["facts"]))
+        aliases = payload["allowed_evidence_aliases"]
+        return {
+            "selected_issue": selected,
+            "claim_decisions": [
+                {
+                    "claim_id": claim["claim_id"],
+                    "verdict": (
+                        "supported" if claim["topic"] == selected else "insufficient_evidence"
+                    ),
+                    "supporting_fact_codes": (
+                        fact_codes if claim["topic"] == selected else []
+                    ),
+                    "supporting_evidence_aliases": (
+                        aliases if claim["topic"] == selected else []
+                    ),
+                }
+                for claim in payload["claims"]
+            ],
+            "supporting_fact_codes": fact_codes,
+            "supporting_evidence_aliases": aliases,
+            "confidence_band": "medium",
+        }
+
+
 def envelope(ref: str, domain: str, data: object, hash_character: str) -> dict[str, Any]:
     return {
         "schema_version": "day09-mcp-evidence-v1",
@@ -225,6 +254,8 @@ def test_solve_case_runs_end_to_end_with_fake_boundaries() -> None:
         "tool_result_consumed",
         "policy_decided",
         "handoff",
+        "task_assigned",
+        "handoff",
         "verification_completed",
         "case_finalized",
     ]
@@ -274,3 +305,24 @@ def test_unknown_claim_topic_cannot_select_extra_tools() -> None:
 
     assert output["assessment"]["primary_issue"] == "insufficient_evidence"
     assert [call[0] for call in gateway.calls] == ["get_order", "get_order_items"]
+
+
+def test_solve_case_uses_valid_adjudicator_result() -> None:
+    sink = FakeTraceSink()
+    output = asyncio.run(
+        solve_case(
+            input_case(),
+            FakeGateway(),
+            sink,
+            adjudicator_client=ValidAdjudicatorClient(),
+        )
+    )
+    model_handoff = next(
+        event
+        for event in sink.events
+        if event.get("actor") == "semantic-adjudicator"
+        and event["event_type"] == "handoff"
+    )
+    assert output["assessment"]["primary_issue"] == "canceled_order_paid"
+    assert model_handoff["decision_code"] == "ADJUDICATION_ACCEPTED"
+    assert model_handoff["attributes"]["attempts"] == 1
