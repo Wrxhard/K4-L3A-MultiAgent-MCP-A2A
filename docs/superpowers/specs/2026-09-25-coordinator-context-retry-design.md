@@ -52,6 +52,60 @@ interfaces but does not implement any of those agents.
 - Persisting private prompts, transcripts, or chain-of-thought.
 - Inventing a fallback competition answer when required agent output is absent.
 
+## Framework architecture
+
+The coordinator uses LangGraph `StateGraph` as its explicit workflow state
+machine and LangChain `Runnable` objects as the execution contract for concrete
+agents.
+
+Required dependency ranges:
+
+- `langgraph>=1.2,<2`
+- `langchain>=1.4,<2`
+
+`CoordinatorState` is a typed graph state containing `CaseState`, the current
+candidate, the latest verification report, and terminal error information. A
+small runtime context exposes the immutable `AgentRegistry` and trace writer to
+nodes without serializing those objects into graph state.
+
+The compiled graph contains these phases:
+
+```text
+START
+  -> order_item
+  -> payment_and_shipment
+  -> policy
+  -> assemble
+  -> verify
+  -> route_after_verification
+       -> END when passed
+       -> retry_target -> assemble when retryable
+       -> fail -> END for a terminal coordinator error
+```
+
+`payment_and_shipment` invokes both LangChain runnables concurrently with
+`asyncio.gather` after Order/Item discovery. `retry_target` invokes only the
+target actor, plus downstream recomputations required by dependency changes.
+This keeps graph topology understandable while preserving targeted retry
+semantics.
+
+Gateway/sub-agent local retries remain inside their concrete runnable and are
+not implemented as LangGraph node retries. Coordinator task recovery for
+`AGENT_TIMEOUT`, `AGENT_CRASHED`, and `AGENT_NO_RESPONSE` is bounded inside the
+shared agent-invocation helper so one failed concurrent actor does not force an
+unrelated actor to rerun.
+
+The graph is compiled without a persistent checkpointer in this scope. State is
+isolated per `ainvoke` call and the existing public JSONL trace remains the
+submission audit artifact. Persistence, resume-after-process-restart, LangSmith,
+and human-in-the-loop interrupts are out of scope.
+
+Official API references used by the implementation plan:
+
+- https://reference.langchain.com/python/langgraph/graph/state/StateGraph
+- https://reference.langchain.com/python/langgraph/graph/state/StateGraph/add_node
+- https://reference.langchain.com/python/langgraph/types/RetryPolicy
+
 ## Components and ownership
 
 ### `student_agent.agent_contracts`

@@ -7,6 +7,15 @@ tạo kết quả nháp, gửi kết quả cho Verifier và chạy lại đúng 
 
 Coordinator không tự suy luận nghiệp vụ và không tạo evidence giả.
 
+## Framework
+
+- LangGraph `StateGraph` quản lý các bước và trạng thái workflow.
+- LangChain `Runnable` là interface chung để Coordinator gọi từng agent.
+- Agent của mỗi thành viên có thể dùng model/tool khác nhau miễn implement đúng
+  Runnable input/output contract.
+- Graph không bật persistent checkpoint trong scope hiện tại; mỗi case có state
+  riêng và JSONL trace vẫn là audit artifact chính.
+
 ## Thành viên phụ trách
 
 | Thành phần | Người phụ trách | Trách nhiệm |
@@ -35,6 +44,9 @@ Verifier kiểm tra
   ├── pass  → Coordinator trả output
   └── retry → Coordinator gọi lại đúng agent
 ```
+
+Trong LangGraph, luồng được chia thành các node `order_item`,
+`payment_and_shipment`, `policy`, `assemble`, `verify` và `retry_target`.
 
 Order/Item chạy trước vì Payment và Shipment có thể cần `order_id`, `item_id`,
 `payment_reference` hoặc `shipment_id` đã được xác nhận.
