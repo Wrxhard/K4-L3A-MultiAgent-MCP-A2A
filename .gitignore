@@ -15,6 +15,7 @@ venv/
 .ruff_cache/
 .coverage
 htmlcov/
+.superpowers/
 
 # Competition runtime artifacts
 case-set.json
