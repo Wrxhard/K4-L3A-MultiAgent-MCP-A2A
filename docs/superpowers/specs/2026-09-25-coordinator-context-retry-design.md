@@ -19,6 +19,8 @@ interfaces but does not implement any of those agents.
   and the current candidate output without receiving private reasoning.
 - A verifier retry decision identifies one actor and causes only the necessary
   work to be repeated.
+- Deterministic transient failures are retried by coordinator policy without
+  spending a verifier call on an operational decision.
 - A specialist retry invalidates and reruns Policy because Policy depends on all
   specialist results.
 - Retry loops are bounded by both per-actor and workflow-wide limits.
@@ -32,7 +34,8 @@ interfaces but does not implement any of those agents.
 
 - Shared coordinator-facing dataclasses and callable protocols.
 - Per-case execution state and immutable attempt history.
-- Specialist dispatch for `order_item`, `payment`, and `shipment`.
+- Staged specialist dispatch: `order_item` discovery first, followed by parallel
+  `payment` and `shipment` work using the normalized entity context.
 - Policy dispatch after the required specialist results are available.
 - Deterministic candidate-output assembly.
 - Verification package creation and verifier-directed retry routing.
@@ -68,10 +71,19 @@ This module is the stable boundary shared by all team members.
 
 - `actor` and `attempt` matching the task.
 - `status`: `completed` or `failed`.
-- `output_fragment`: actor-owned candidate fields when completed.
+- A role-specific typed payload when completed. `OrderItemPayload`,
+  `PaymentPayload`, `ShipmentPayload`, and `PolicyPayload` prevent arbitrary
+  dictionaries from becoming an implicit cross-team API.
 - `evidence_refs`: evidence actually consumed by the actor.
 - `tool_calls`: observable tool-call summaries.
-- `failed_stage`, `error_code`, and `error_message` for a failed attempt.
+- `failed_stage`, `error_code`, `retryable`, and a sanitized `safe_detail` for a
+  failed attempt. Raw exceptions and MCP response bodies are not shared.
+
+The three specialist payloads contain factual findings, normalized entities,
+and evidence-backed observations. They do not make the final policy decision.
+`PolicyPayload` contains the semantic fields needed in the final answer:
+assessment, optional claim assessments, root cause analysis, data conflicts,
+financial resolution, and resolution actions.
 
 `VerificationPackage` contains:
 
@@ -119,24 +131,34 @@ missing; it must not silently substitute fake agents.
 ## Data flow
 
 1. Validate that the input has a usable `case_id`.
-2. Dispatch Order/Item, Payment, and Shipment with attempt `1`.
-3. Store every returned result or normalized failure in `CaseState`.
-4. If every required specialist completed, dispatch Policy with a context
+2. Dispatch Order/Item with attempt `1` to resolve the authoritative order,
+   item, seller, payment, and shipment identifiers available for downstream use.
+3. Store the result or normalized failure in `CaseState`.
+4. When Order/Item completes, dispatch Payment and Shipment concurrently with
+   the normalized entity context. Store every result or normalized failure.
+5. If every required specialist completed, dispatch Policy with a context
    snapshot containing active specialist results.
-5. Assemble `candidate_output` when all required active results are complete.
-6. Build a `VerificationPackage` and invoke Verifier. The package may contain a
+6. Assemble `candidate_output` when all required active results are complete.
+7. Build a `VerificationPackage` and invoke Verifier. The package may contain a
    `None` candidate when an upstream failure needs diagnosis.
-7. On `passed`, return the candidate only if it exists.
-8. On `retry_required`, validate the target and limits, append the feedback,
+8. On `passed`, return the candidate only if it exists.
+9. On `retry_required`, validate the target and limits, append the feedback,
    invoke the target again, and preserve the earlier attempt.
-9. When a specialist is retried successfully, invalidate and rerun Policy before
-   rebuilding the candidate.
-10. On `failed`, invalid feedback, or exhausted limits, raise a structured
+10. When a specialist is retried successfully, invalidate and rerun its
+   downstream dependants before rebuilding the candidate. Retrying Order/Item
+   reruns Payment, Shipment, and Policy; retrying Payment or Shipment reruns
+   Policy.
+11. On `failed`, invalid feedback, or exhausted limits, raise a structured
     coordinator exception. Do not manufacture an output.
 
-Specialists may initially be dispatched concurrently because they depend only
-on the original case. Retries are sequential so each verification round observes
-a stable state.
+Before invoking Verifier, coordinator may directly retry an allowlisted
+transient failure such as `MCP_TIMEOUT` or `CONNECTION_RESET`. This uses the same
+per-actor attempt budget and is recorded in state and trace. Permanent,
+semantic, or unknown failures remain visible to Verifier.
+
+Payment and Shipment run concurrently only after Order/Item discovery, so each
+receives a stable identifier set. Retries are sequential so each verification
+round observes a stable state.
 
 ## Candidate-output ownership and merge rules
 
@@ -145,26 +167,27 @@ The coordinator always writes:
 - `schema_version = "day09-l3a-output-v2"`
 - `case_id`
 
-Payment exclusively owns:
-
-- `financial_resolution`
-
 Policy exclusively owns:
 
 - `assessment`
+- `claim_assessments` when claims are emitted
 - `root_cause_analysis`
 - `data_conflicts`
+- `financial_resolution`
 - `resolution_actions`
 
 The following fields are collected from all completed agents:
 
 - `affected_entities`: union each entity list while preserving first-seen order.
 - `evidence_refs`: union while preserving first-seen order.
-- `claim_assessments`: concatenate unique `claim_id` values.
 
-An actor may only return fields assigned above. Unknown or foreign-owned fields
-are coordinator contract errors. Conflicting duplicate claim IDs are contract
-errors rather than last-write-wins merges.
+Specialist observations are retained in the verification context but are not
+copied into final semantic fields.
+
+Role-specific payload validation rejects unknown or foreign-owned fields before
+assembly. Conflicting specialist observations remain explicit inputs to Policy
+and Verifier; coordinator does not resolve semantic conflicts by applying
+last-write-wins behavior.
 
 The assembled candidate is validated later by the existing output contract at
 the CLI boundary. Verifier receives the candidate before finalization and may
@@ -178,6 +201,13 @@ Defaults:
 - Maximum verification rounds: `5`.
 - Valid retry targets: `order_item`, `payment`, `shipment`, and `policy`.
 - Verifier itself is not a retry target in the initial implementation.
+- Direct coordinator retry is restricted to the allowlisted transient codes
+  `MCP_TIMEOUT` and `CONNECTION_RESET`.
+
+There are two retry paths:
+
+1. Coordinator operational retry for an allowlisted transient agent failure.
+2. Verifier-directed retry for semantic, evidence, scope, or consistency errors.
 
 A retry request is accepted only when:
 
@@ -188,8 +218,10 @@ A retry request is accepted only when:
 - The workflow has remaining verification rounds.
 
 Retrying a specialist invalidates the active Policy result even if the specialist
-fails again. Policy runs again only after all specialists have active completed
-results. Retrying Policy preserves specialist results.
+fails again. Retrying Order/Item also invalidates and reruns Payment and Shipment
+because their inputs may have changed. Policy runs again only after all
+specialists have active completed results. Retrying Policy preserves specialist
+results.
 
 ## Error handling
 
@@ -218,7 +250,8 @@ The coordinator emits only observable events allowed by the existing schema:
 `decision_code` carries stable status/retry codes. `attributes` may contain
 scalar values such as attempt, verification round, status, error code, and failed
 stage. `evidence_refs` contains only validated evidence identifiers supplied by
-agents. Prompts, raw conversations, secrets, and private reasoning are excluded.
+agents. Prompts, raw conversations, raw exceptions, raw MCP bodies, secrets, and
+private reasoning are excluded.
 
 ## Testing strategy
 
@@ -228,15 +261,23 @@ not test a mock framework's invocation bookkeeping as a substitute for behavior.
 Required cases:
 
 - Happy path builds the expected candidate and preserves evidence/entity order.
+- Order/Item completes before Payment and Shipment receive their tasks.
+- Payment and Shipment receive the normalized entity context from Order/Item.
 - Verifier sees a failed specialist attempt in its package.
+- Allowlisted transient failures retry without a verifier round.
+- Non-allowlisted failures remain visible to Verifier.
 - Verifier retries Payment once and the second result replaces only the active
   Payment result while history retains both attempts.
 - A specialist retry causes Policy to rerun with the updated context.
+- An Order/Item retry invalidates Payment, Shipment, and Policy.
 - A Policy retry does not rerun specialists.
 - Invalid and non-retryable verifier feedback is rejected.
 - Per-actor and global verification limits stop loops deterministically.
 - Unexpected agent exceptions become structured failed results.
-- Actor ownership and duplicate-claim conflicts fail candidate assembly.
+- Role-specific payload validation rejects fields owned by another role.
+- Conflicting specialist observations reach Policy and Verifier without silent
+  overwrite.
+- Raw exception details do not enter verification packages or traces.
 - Trace events validate against the public trace schema.
 
 The full existing pytest suite and Ruff checks must pass before completion.
@@ -246,6 +287,7 @@ The full existing pytest suite and Ruff checks must pass before completion.
 `docs/team-agent-implementation-guide.md` will document:
 
 - Exact callable signatures and field ownership.
+- Role-specific payload models and factual-versus-semantic ownership.
 - Completed and failed result examples.
 - Verification report examples.
 - Retry semantics and dependency invalidation.
@@ -258,6 +300,9 @@ The full existing pytest suite and Ruff checks must pass before completion.
 
 - Every input case has a string `case_id`.
 - Agent payloads and context snapshots are JSON-compatible dictionaries.
+- Order/Item is the authoritative discovery stage unless the final input
+  contract proves that all downstream identifiers are independently available;
+  that later optimization must not change the shared result contracts.
 - Evidence identifiers have already been obtained through the authorized MCP
   gateway; the coordinator never creates them.
 - Concrete agents will be registered later without changing coordinator logic.
