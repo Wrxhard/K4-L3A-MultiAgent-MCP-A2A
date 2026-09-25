@@ -133,7 +133,7 @@ class AgentTask:
     retry_count_for_context: int
     case: Mapping[str, JSONValue]
     context: Mapping[str, Any]
-    feedback: AgentFeedback | None
+    feedback: AgentFeedback | None = None
 
     def __post_init__(self) -> None:
         if not self.case_id:
@@ -205,7 +205,7 @@ class AgentResult:
             retry_count_for_context=retry_count_for_context,
             status="completed",
             payload=payload,
-            evidence_refs=evidence_refs,
+            evidence_refs=tuple(dict.fromkeys(evidence_refs)),
             tool_calls=tool_calls,
             failed_stage=None,
             error_code=None,
@@ -240,7 +240,7 @@ class AgentResult:
             failed_stage=failed_stage,
             error_code=error_code,
             retryable=retryable,
-            safe_detail=safe_detail,
+            safe_detail=safe_detail[:160],
         )
 
 

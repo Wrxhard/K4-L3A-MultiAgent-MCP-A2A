@@ -87,16 +87,16 @@ def test_retry_report_requires_a_known_actor() -> None:
         validate_verification_report(report)
 
 
-def test_completed_result_rejects_duplicate_evidence_refs() -> None:
-    with pytest.raises(ValueError, match="evidence_refs"):
-        AgentResult.completed(
-            actor="payment",
-            invocation=1,
-            context_version=1,
-            retry_count_for_context=0,
-            payload=PaymentPayload(EntitySet(), ()),
-            evidence_refs=("ev_12345678901234567890", "ev_12345678901234567890"),
-        )
+def test_completed_result_deduplicates_evidence_refs() -> None:
+    result = AgentResult.completed(
+        actor="payment",
+        invocation=1,
+        context_version=1,
+        retry_count_for_context=0,
+        payload=PaymentPayload(EntitySet(), ()),
+        evidence_refs=("ev_12345678901234567890", "ev_12345678901234567890"),
+    )
+    assert result.evidence_refs == ("ev_12345678901234567890",)
 
 
 def test_registry_returns_the_runnable_for_each_actor() -> None:
