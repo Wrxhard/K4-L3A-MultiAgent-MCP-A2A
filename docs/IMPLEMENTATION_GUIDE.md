@@ -199,6 +199,10 @@ task_assigned
   → handoff
 ```
 
+Policy decision codes gồm `POLICY_REFUND_ELIGIBLE`,
+`POLICY_REFUND_INELIGIBLE` và `POLICY_NEEDS_FACT`; trạng thái không có refund record
+không được ánh xạ thành một quyết định hoàn tiền thành công.
+
 Verifier phát `verification_completed`. Nếu cần revision, lần đầu dùng
 `REVISION_REQUIRED`, sau revision phát kết quả cuối. Không emit consumed cho response
 bị reject trước khi sử dụng.

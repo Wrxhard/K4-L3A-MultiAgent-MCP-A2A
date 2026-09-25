@@ -104,3 +104,14 @@ def make_shipment_task(case: NormalizedCase) -> AgentTask:
         entity_ids=(case.claimed_order_id,),
         required_fact_codes=("SHIPMENT_TIMELINE", "SHIPMENT_ISSUE"),
     )
+
+
+def make_policy_task(case: NormalizedCase) -> AgentTask:
+    return AgentTask(
+        task_id=f"{case.case_id}-policy-1",
+        case_id=case.case_id,
+        actor="policy-agent",
+        objective="Apply the configured policy to verified facts and candidate issue",
+        entity_ids=(case.claimed_order_id,),
+        required_fact_codes=("POLICY_VERSION", "POLICY_REFUND_ELIGIBLE"),
+    )

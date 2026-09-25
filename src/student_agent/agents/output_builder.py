@@ -12,6 +12,7 @@ from student_agent.domain import (
     PartyType,
     PrimaryIssue,
     RankedCause,
+    RefundLine,
     ResponsibleParty,
     SpecialistReport,
 )
@@ -46,6 +47,34 @@ def _first_tuple_fact(
         if value:
             return value
     return ()
+
+
+def select_verified_issue(
+    case: NormalizedCase, reports: tuple[SpecialistReport, ...]
+) -> PrimaryIssue:
+    observed_issues = tuple(
+        value
+        for code in ("REFUND_ISSUE", "PAYMENT_ISSUE", "SHIPMENT_ISSUE")
+        if isinstance((value := _fact_value(reports, code)), str)
+    )
+    claim_topics = {claim.topic for claim in case.claims}
+    issue_value = next(
+        (value for value in observed_issues if value in claim_topics),
+        observed_issues[0] if observed_issues else None,
+    )
+    order_status = _fact_value(reports, "ORDER_STATUS")
+    paid_total = _fact_value(reports, "PAYMENT_TOTAL_BRL")
+    if issue_value is None and isinstance(order_status, str) and isinstance(paid_total, Decimal):
+        normalized_status = order_status.lower()
+        if paid_total > 0 and normalized_status in {"canceled", "cancelled"}:
+            issue_value = PrimaryIssue.CANCELED_ORDER_PAID.value
+        elif paid_total > 0 and normalized_status in {"unavailable", "unavailable_order"}:
+            issue_value = PrimaryIssue.UNAVAILABLE_ORDER_PAID.value
+    return (
+        PrimaryIssue(issue_value)
+        if isinstance(issue_value, str)
+        else PrimaryIssue.INSUFFICIENT_EVIDENCE
+    )
 
 
 def build_order_only_draft(
@@ -91,36 +120,20 @@ def build_rules_draft(
     seller_ids = _first_tuple_fact(reports, "SELLER_IDS")
     payment_references = _first_tuple_fact(reports, "PAYMENT_REFERENCES")
     shipment_ids = _first_tuple_fact(reports, "SHIPMENT_IDS")
-    observed_issues = tuple(
-        value
-        for code in ("REFUND_ISSUE", "PAYMENT_ISSUE", "SHIPMENT_ISSUE")
-        if isinstance((value := _fact_value(reports, code)), str)
-    )
-    claim_topics = {claim.topic for claim in case.claims}
-    issue_value = next(
-        (value for value in observed_issues if value in claim_topics),
-        observed_issues[0] if observed_issues else None,
-    )
-    order_status = _fact_value(reports, "ORDER_STATUS")
-    paid_total = _fact_value(reports, "PAYMENT_TOTAL_BRL")
-    if issue_value is None and isinstance(order_status, str) and isinstance(paid_total, Decimal):
-        normalized_status = order_status.lower()
-        if paid_total > 0 and normalized_status in {"canceled", "cancelled"}:
-            issue_value = PrimaryIssue.CANCELED_ORDER_PAID.value
-        elif paid_total > 0 and normalized_status in {"unavailable", "unavailable_order"}:
-            issue_value = PrimaryIssue.UNAVAILABLE_ORDER_PAID.value
-
-    issue = (
-        PrimaryIssue(issue_value)
-        if isinstance(issue_value, str)
-        else PrimaryIssue.INSUFFICIENT_EVIDENCE
-    )
+    issue = select_verified_issue(case, reports)
     sufficient = issue is not PrimaryIssue.INSUFFICIENT_EVIDENCE
     no_action = issue is PrimaryIssue.VALID_SPLIT_PAYMENT
+    refund_eligible = _fact_value(reports, "POLICY_REFUND_ELIGIBLE")
+    policy_refund = _fact_value(reports, "POLICY_REFUND_BRL")
+    policy_decisive = isinstance(refund_eligible, bool)
     confidence = (
         Decimal("0.85")
         if no_action
-        else Decimal("0.72") if sufficient else Decimal("0.35")
+        else Decimal("0.88")
+        if sufficient and policy_decisive
+        else Decimal("0.72")
+        if sufficient
+        else Decimal("0.35")
     )
     assessments = tuple(
         ClaimAssessment(
@@ -128,15 +141,45 @@ def build_rules_draft(
             verdict=(
                 ClaimVerdict.SUPPORTED
                 if claim.topic == issue.value
+                or (
+                    claim.topic == "requested_full_refund"
+                    and refund_eligible is True
+                    and isinstance(policy_refund, Decimal)
+                    and policy_refund > 0
+                )
+                else ClaimVerdict.UNSUPPORTED
+                if claim.topic == "requested_full_refund" and refund_eligible is False
                 else ClaimVerdict.INSUFFICIENT_EVIDENCE
             ),
-            confidence=confidence if claim.topic == issue.value else Decimal("0.35"),
+            confidence=(
+                confidence
+                if claim.topic == issue.value
+                or (
+                    claim.topic == "requested_full_refund"
+                    and (
+                        refund_eligible is False
+                        or (
+                            refund_eligible is True
+                            and isinstance(policy_refund, Decimal)
+                            and policy_refund > 0
+                        )
+                    )
+                )
+                else Decimal("0.35")
+            ),
             evidence_refs=refs,
         )
         for claim in case.claims
     )
     cause_code = issue.value.upper() if sufficient else "INSUFFICIENT_PAYMENT_POLICY_EVIDENCE"
-    actions = () if no_action else ("collect_policy_evidence",)
+    policy_actions = _fact_value(reports, "POLICY_ACTIONS")
+    actions = (
+        tuple(policy_actions)
+        if isinstance(policy_actions, tuple)
+        else ()
+        if no_action
+        else ("collect_policy_evidence",)
+    )
     conflicts = tuple(conflict for report in reports for conflict in report.conflicts)
     if issue is PrimaryIssue.LATE_DELIVERY_SELLER:
         responsible_parties = (
@@ -144,12 +187,28 @@ def build_rules_draft(
         )
     elif issue is PrimaryIssue.LATE_DELIVERY_LOGISTICS:
         responsible_parties = (ResponsibleParty(PartyType.LOGISTICS_PROVIDER, None),)
+    elif isinstance((policy_party := _fact_value(reports, "POLICY_RESPONSIBLE_PARTY")), str):
+        responsible_parties = (ResponsibleParty(PartyType(policy_party), None),)
     else:
         responsible_parties = (ResponsibleParty(PartyType.UNKNOWN, None),)
+    refund_amount = policy_refund if isinstance(policy_refund, Decimal) else Decimal("0")
+    refund_lines = (
+        (RefundLine(f"{issue.value.upper()}_POLICY_REFUND", refund_amount, case.claimed_order_id),)
+        if refund_eligible is True and refund_amount > 0
+        else ()
+    )
+    if refund_lines:
+        actions = actions or ("issue_policy_refund",)
     return DraftAssessment(
         case_id=case.case_id,
         primary_issue=issue,
-        case_status=CaseStatus.NO_ACTION if no_action else CaseStatus.NEEDS_INVESTIGATION,
+        case_status=(
+            CaseStatus.NO_ACTION
+            if no_action
+            else CaseStatus.ACTION_REQUIRED
+            if refund_lines
+            else CaseStatus.NEEDS_INVESTIGATION
+        ),
         confidence=confidence,
         claim_assessments=assessments,
         entities=EntityIndex(
@@ -163,8 +222,8 @@ def build_rules_draft(
         responsible_parties=responsible_parties,
         evidence_refs=refs,
         conflicts=conflicts,
-        recommended_refund_brl=Decimal("0"),
-        refund_lines=(),
+        recommended_refund_brl=refund_amount if refund_lines else Decimal("0"),
+        refund_lines=refund_lines,
         resolution_actions=actions,
     )
 

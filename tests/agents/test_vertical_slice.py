@@ -70,6 +70,28 @@ class FakeGateway:
                 },
                 "d",
             ),
+            "get_policy": envelope(
+                "ev_policy_abcdefghijklmnopqrstuvwxyz",
+                "policy",
+                {
+                    "currency": "BRL",
+                    "policy_version": "EC_POLICY_V1",
+                    "rules": {
+                        "canceled_order_paid": {
+                            "refund_eligible": True,
+                            "refund_type": "full",
+                            "resolution_actions": ["issue_policy_refund"],
+                            "responsible_party": "platform",
+                        },
+                        "late_delivery_logistics": {
+                            "refund_eligible": False,
+                            "resolution_actions": ["contact_logistics_provider"],
+                            "responsible_party": "logistics_provider",
+                        },
+                    },
+                },
+                "e",
+            ),
         }
 
     async def call(
@@ -187,6 +209,9 @@ def test_solve_case_runs_end_to_end_with_fake_boundaries() -> None:
 
     assert output["case_id"] == "CASE_001"
     assert output["assessment"]["primary_issue"] == "canceled_order_paid"
+    assert output["assessment"]["case_status"] == "action_required"
+    assert output["financial_resolution"]["recommended_refund_brl"] == 110.0
+    assert output["resolution_actions"] == ["issue_policy_refund"]
     assert [event["event_type"] for event in sink.events] == [
         "case_received",
         "task_assigned",
@@ -195,6 +220,10 @@ def test_solve_case_runs_end_to_end_with_fake_boundaries() -> None:
         "handoff",
         "task_assigned",
         "tool_result_consumed",
+        "handoff",
+        "task_assigned",
+        "tool_result_consumed",
+        "policy_decided",
         "handoff",
         "verification_completed",
         "case_finalized",
@@ -212,4 +241,7 @@ def test_solve_case_routes_late_delivery_to_shipment_specialist() -> None:
     assert output["root_cause_analysis"]["responsible_parties"] == [
         {"party_type": "logistics_provider", "party_id": None}
     ]
-    assert [call[0] for call in gateway.calls][-1] == "get_shipment_summary"
+    assert [call[0] for call in gateway.calls][-2:] == [
+        "get_shipment_summary",
+        "get_policy",
+    ]

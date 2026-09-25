@@ -9,11 +9,14 @@ from .agents import (
     draft_to_output,
     investigate_order_items,
     investigate_payments,
+    investigate_policy,
     investigate_shipment,
     make_order_item_task,
     make_payment_task,
+    make_policy_task,
     make_shipment_task,
     normalize_case,
+    select_verified_issue,
     verify_draft,
 )
 from .evidence import EvidenceRegistry, ToolCatalog
@@ -81,6 +84,29 @@ async def solve_case(
         )
         lifecycle.handoff(shipment_report)
         reports.append(shipment_report)
+    candidate_issue = select_verified_issue(normalized, tuple(reports))
+    paid_total = next(
+        (
+            fact.value
+            for fact in payment_report.facts
+            if fact.fact_code == "PAYMENT_TOTAL_BRL"
+        ),
+        None,
+    )
+    policy_task = make_policy_task(normalized)
+    lifecycle.task_assigned(policy_task)
+    policy_report = await investigate_policy(
+        policy_task,
+        policy_version=normalized.policy_version,
+        issue=candidate_issue,
+        paid_total_brl=paid_total,
+        gateway=gateway,
+        catalog=catalog,
+        registry=registry,
+        trace=lifecycle,
+    )
+    lifecycle.handoff(policy_report)
+    reports.append(policy_report)
     draft = build_rules_draft(normalized, tuple(reports))
     verification = verify_draft(
         draft,
