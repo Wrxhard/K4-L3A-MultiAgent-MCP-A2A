@@ -4,6 +4,7 @@ from decimal import Decimal
 from typing import Any
 
 from student_agent.domain import (
+    CandidateSet,
     CaseStatus,
     ClaimAssessment,
     ClaimVerdict,
@@ -113,14 +114,16 @@ def build_order_only_draft(
 
 
 def build_rules_draft(
-    case: NormalizedCase, reports: tuple[SpecialistReport, ...]
+    case: NormalizedCase,
+    reports: tuple[SpecialistReport, ...],
+    candidates: CandidateSet | None = None,
 ) -> DraftAssessment:
     refs = _all_refs(reports)
     item_ids = _first_tuple_fact(reports, "ORDER_ITEM_IDS")
     seller_ids = _first_tuple_fact(reports, "SELLER_IDS")
     payment_references = _first_tuple_fact(reports, "PAYMENT_REFERENCES")
     shipment_ids = _first_tuple_fact(reports, "SHIPMENT_IDS")
-    issue = select_verified_issue(case, reports)
+    issue = candidates.issues[0] if candidates is not None else select_verified_issue(case, reports)
     sufficient = issue is not PrimaryIssue.INSUFFICIENT_EVIDENCE
     no_action = issue is PrimaryIssue.VALID_SPLIT_PAYMENT
     refund_eligible = _fact_value(reports, "POLICY_REFUND_ELIGIBLE")

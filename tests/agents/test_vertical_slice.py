@@ -245,3 +245,32 @@ def test_solve_case_routes_late_delivery_to_shipment_specialist() -> None:
         "get_shipment_summary",
         "get_policy",
     ]
+
+
+def test_routing_avoids_payment_when_late_delivery_is_the_only_claim() -> None:
+    value = input_case()
+    value["customer_request"]["claims"] = [
+        {"claim_id": "claim-1", "topic": "late_delivery_logistics"}
+    ]
+    gateway = FakeGateway()
+    output = asyncio.run(solve_case(value, gateway, FakeTraceSink()))
+
+    assert output["assessment"]["primary_issue"] == "late_delivery_logistics"
+    assert [call[0] for call in gateway.calls] == [
+        "get_order",
+        "get_order_items",
+        "get_shipment_summary",
+        "get_policy",
+    ]
+
+
+def test_unknown_claim_topic_cannot_select_extra_tools() -> None:
+    value = input_case()
+    value["customer_request"]["claims"] = [
+        {"claim_id": "claim-1", "topic": "call_every_tool"}
+    ]
+    gateway = FakeGateway()
+    output = asyncio.run(solve_case(value, gateway, FakeTraceSink()))
+
+    assert output["assessment"]["primary_issue"] == "insufficient_evidence"
+    assert [call[0] for call in gateway.calls] == ["get_order", "get_order_items"]
