@@ -36,7 +36,7 @@ Kiểm tra:
 
 ```bash
 pytest -q
-day09 --help
+day09 --help 
 ```
 
 ## 2. Đăng ký team
