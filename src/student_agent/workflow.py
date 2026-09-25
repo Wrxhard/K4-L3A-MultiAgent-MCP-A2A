@@ -2,17 +2,23 @@ from __future__ import annotations
 
 from typing import Any
 
+from .agent_contracts import AgentRegistry
+from .coordinator import Coordinator
 from .mcp_gateway import EvidenceGateway
 from .trace import TraceWriter
 
 
 async def solve_case(
-    case: dict[str, Any], gateway: EvidenceGateway, trace: TraceWriter
+    case: dict[str, Any],
+    gateway: EvidenceGateway,
+    trace: TraceWriter,
+    *,
+    registry: AgentRegistry | None = None,
 ) -> dict[str, Any]:
-    """Implement the L3A coordinator and specialist-agent workflow here.
-
-    The starter kit intentionally does not generate a fallback answer: submitting an
-    invented answer or evidence reference would violate the competition contract.
-    """
-    del case, gateway, trace
-    raise NotImplementedError("Implement the L3A multi-agent workflow in solve_case()")
+    """Run one case through the coordinator with explicitly wired team agents."""
+    del gateway
+    if registry is None:
+        raise RuntimeError(
+            "AgentRegistry is required until the team agent implementations are wired"
+        )
+    return await Coordinator().solve(case, registry, trace)

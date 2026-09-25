@@ -252,7 +252,7 @@ class Coordinator:
         case_state.candidate_output = None
         runtime.context["trace"].emit(
             case_id=case_state.case_id,
-            event_type="retry_scheduled",
+            event_type="handoff",
             actor="coordinator",
             target=target,
             decision_code=report.error_code or "VERIFICATION_FAILED",
