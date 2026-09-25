@@ -90,8 +90,16 @@ def build_rules_draft(
     item_ids = _first_tuple_fact(reports, "ORDER_ITEM_IDS")
     seller_ids = _first_tuple_fact(reports, "SELLER_IDS")
     payment_references = _first_tuple_fact(reports, "PAYMENT_REFERENCES")
-    issue_value = _fact_value(reports, "REFUND_ISSUE") or _fact_value(
-        reports, "PAYMENT_ISSUE"
+    shipment_ids = _first_tuple_fact(reports, "SHIPMENT_IDS")
+    observed_issues = tuple(
+        value
+        for code in ("REFUND_ISSUE", "PAYMENT_ISSUE", "SHIPMENT_ISSUE")
+        if isinstance((value := _fact_value(reports, code)), str)
+    )
+    claim_topics = {claim.topic for claim in case.claims}
+    issue_value = next(
+        (value for value in observed_issues if value in claim_topics),
+        observed_issues[0] if observed_issues else None,
     )
     order_status = _fact_value(reports, "ORDER_STATUS")
     paid_total = _fact_value(reports, "PAYMENT_TOTAL_BRL")
@@ -130,6 +138,14 @@ def build_rules_draft(
     cause_code = issue.value.upper() if sufficient else "INSUFFICIENT_PAYMENT_POLICY_EVIDENCE"
     actions = () if no_action else ("collect_policy_evidence",)
     conflicts = tuple(conflict for report in reports for conflict in report.conflicts)
+    if issue is PrimaryIssue.LATE_DELIVERY_SELLER:
+        responsible_parties = (
+            ResponsibleParty(PartyType.SELLER, seller_ids[0] if seller_ids else None),
+        )
+    elif issue is PrimaryIssue.LATE_DELIVERY_LOGISTICS:
+        responsible_parties = (ResponsibleParty(PartyType.LOGISTICS_PROVIDER, None),)
+    else:
+        responsible_parties = (ResponsibleParty(PartyType.UNKNOWN, None),)
     return DraftAssessment(
         case_id=case.case_id,
         primary_issue=issue,
@@ -141,9 +157,10 @@ def build_rules_draft(
             item_ids=item_ids,
             seller_ids=seller_ids,
             payment_references=payment_references,
+            shipment_ids=shipment_ids,
         ),
         ranked_causes=(RankedCause(cause_code, 1),),
-        responsible_parties=(ResponsibleParty(PartyType.UNKNOWN, None),),
+        responsible_parties=responsible_parties,
         evidence_refs=refs,
         conflicts=conflicts,
         recommended_refund_brl=Decimal("0"),

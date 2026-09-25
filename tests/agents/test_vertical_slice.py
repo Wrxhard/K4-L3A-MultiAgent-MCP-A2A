@@ -57,6 +57,19 @@ class FakeGateway:
                 },
                 "c",
             ),
+            "get_shipment_summary": envelope(
+                "ev_shipment_abcdefghijklmnopqrstuvwxyz",
+                "shipment",
+                {
+                    "order_id": "order-1",
+                    "shipment_id": "shipment-1",
+                    "shipping_limit_at": "2026-01-10T10:00:00Z",
+                    "carrier_handoff_at": "2026-01-09T10:00:00Z",
+                    "estimated_delivery_at": "2026-01-15T10:00:00Z",
+                    "delivered_at": "2026-01-18T10:00:00Z",
+                },
+                "d",
+            ),
         }
 
     async def call(
@@ -186,3 +199,17 @@ def test_solve_case_runs_end_to_end_with_fake_boundaries() -> None:
         "verification_completed",
         "case_finalized",
     ]
+
+
+def test_solve_case_routes_late_delivery_to_shipment_specialist() -> None:
+    value = input_case()
+    value["customer_request"]["claims"][0]["topic"] = "late_delivery_logistics"
+    gateway = FakeGateway()
+    output = asyncio.run(solve_case(value, gateway, FakeTraceSink()))
+
+    assert output["assessment"]["primary_issue"] == "late_delivery_logistics"
+    assert output["affected_entities"]["shipment_ids"] == ["shipment-1"]
+    assert output["root_cause_analysis"]["responsible_parties"] == [
+        {"party_type": "logistics_provider", "party_id": None}
+    ]
+    assert [call[0] for call in gateway.calls][-1] == "get_shipment_summary"

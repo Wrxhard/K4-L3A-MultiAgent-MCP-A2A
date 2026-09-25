@@ -3,13 +3,16 @@ from __future__ import annotations
 from typing import Any
 
 from .agents import (
+    SHIPMENT_TOPICS,
     Gateway,
     build_rules_draft,
     draft_to_output,
     investigate_order_items,
     investigate_payments,
+    investigate_shipment,
     make_order_item_task,
     make_payment_task,
+    make_shipment_task,
     normalize_case,
     verify_draft,
 )
@@ -63,7 +66,22 @@ async def solve_case(
         trace=lifecycle,
     )
     lifecycle.handoff(payment_report)
-    draft = build_rules_draft(normalized, (report, payment_report))
+    reports = [report, payment_report]
+    claim_topics = tuple(claim.topic for claim in normalized.claims)
+    if SHIPMENT_TOPICS.intersection(claim_topics):
+        shipment_task = make_shipment_task(normalized)
+        lifecycle.task_assigned(shipment_task)
+        shipment_report = await investigate_shipment(
+            shipment_task,
+            order_id=normalized.claimed_order_id,
+            gateway=gateway,
+            catalog=catalog,
+            registry=registry,
+            trace=lifecycle,
+        )
+        lifecycle.handoff(shipment_report)
+        reports.append(shipment_report)
+    draft = build_rules_draft(normalized, tuple(reports))
     verification = verify_draft(
         draft,
         expected_case_id=normalized.case_id,

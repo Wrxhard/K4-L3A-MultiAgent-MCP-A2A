@@ -93,3 +93,14 @@ def make_payment_task(case: NormalizedCase) -> AgentTask:
         entity_ids=(case.claimed_order_id,),
         required_fact_codes=("PAYMENT_TOTAL_BRL", "PAYMENT_COUNT", "PAYMENT_REFERENCES"),
     )
+
+
+def make_shipment_task(case: NormalizedCase) -> AgentTask:
+    return AgentTask(
+        task_id=f"{case.case_id}-shipment-1",
+        case_id=case.case_id,
+        actor="shipment-agent",
+        objective="Verify delivery timing and locate seller-versus-carrier delay",
+        entity_ids=(case.claimed_order_id,),
+        required_fact_codes=("SHIPMENT_TIMELINE", "SHIPMENT_ISSUE"),
+    )
