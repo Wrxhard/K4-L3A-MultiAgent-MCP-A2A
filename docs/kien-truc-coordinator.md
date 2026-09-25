@@ -82,16 +82,35 @@ Coordinator tạo:
 - danh sách evidence không trùng;
 - candidate output hoàn chỉnh từ kết quả Policy.
 
-## Hai loại retry
+## Ba loại retry
 
-### Retry kỹ thuật
+### Retry cục bộ trong gateway hoặc sub-agent
 
-Coordinator tự retry khi lỗi rõ ràng là tạm thời:
+Gateway hoặc sub-agent tự retry bằng code khi lỗi xảy ra trong một tool/model
+operation:
 
 - `MCP_TIMEOUT`;
-- `CONNECTION_RESET`.
+- `CONNECTION_RESET`;
+- `RATE_LIMITED`;
+- `HTTP_5XX`;
+- `INVALID_MODEL_RESPONSE` (self-repair một lần).
 
-Loại retry này không cần gọi Verifier để ra một quyết định hiển nhiên.
+Loại retry này không chạy lại toàn agent và không cần Coordinator hay Verifier
+ra quyết định. Kết quả agent vẫn phải báo số lần local retry trong tool-call
+summary.
+
+Nếu local retry đã hết, agent trả mã như `MCP_TIMEOUT_EXHAUSTED`. Coordinator
+không tự động retry lại cùng lỗi, tránh nhân số MCP call qua nhiều tầng.
+
+### Recovery của Coordinator
+
+Coordinator chỉ chạy lại toàn agent khi agent task không thể tự phục hồi:
+
+- `AGENT_TIMEOUT`;
+- `AGENT_CRASHED`;
+- `AGENT_NO_RESPONSE`.
+
+Mỗi agent task và một phiên bản context chỉ được recovery một lần.
 
 ### Retry semantic
 
@@ -107,12 +126,23 @@ Feedback phải chỉ rõ `target_actor`, `error_code` và nội dung cần sử
 
 ## Quy tắc retry
 
-- Mỗi actor có tối đa 2 attempt, bao gồm lần đầu.
+- Mỗi tool/model operation có tối đa 2 local attempt.
+- Mỗi agent task có tối đa 1 coordinator recovery cho cùng context.
+- Mỗi actor có tối đa 1 semantic retry cho cùng context.
 - Toàn workflow có tối đa 5 vòng verification.
 - Retry Order/Item sẽ chạy lại Payment, Shipment và Policy.
 - Retry Payment hoặc Shipment sẽ chạy lại Policy.
 - Retry Policy không chạy lại các specialist.
 - Hết giới hạn thì coordinator dừng với lỗi có cấu trúc, không tạo kết quả giả.
+
+Policy chạy lại do Payment hoặc Shipment có dữ liệu mới là `recompute`, không
+phải retry lỗi. Coordinator lưu riêng:
+
+- `agent_invocation`: tổng số lần agent được gọi;
+- `context_version`: phiên bản input phụ thuộc;
+- `retry_count_for_context`: số retry với cùng input.
+
+Khi `context_version` tăng, `retry_count_for_context` được reset.
 
 ## Dạng feedback của Verifier
 
@@ -129,7 +159,8 @@ Feedback phải chỉ rõ `target_actor`, `error_code` và nội dung cần sử
 ## Nguyên tắc tích hợp
 
 - Mỗi agent implement đúng interface chung, không import trực tiếp agent khác.
-- Mỗi kết quả phải có `actor`, `attempt`, `status` và payload đúng role.
+- Mỗi kết quả phải có `actor`, `invocation`, `context_version`,
+  `retry_count_for_context`, `status` và payload đúng role.
 - Evidence chỉ được dùng trong đúng case đã tạo ra nó.
 - Không tự tạo `evidence_ref`.
 - Error routing dùng `error_code`, không parse error message.

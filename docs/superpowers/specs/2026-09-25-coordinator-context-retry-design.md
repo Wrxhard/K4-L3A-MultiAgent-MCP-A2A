@@ -19,8 +19,8 @@ interfaces but does not implement any of those agents.
   and the current candidate output without receiving private reasoning.
 - A verifier retry decision identifies one actor and causes only the necessary
   work to be repeated.
-- Deterministic transient failures are retried by coordinator policy without
-  spending a verifier call on an operational decision.
+- Deterministic tool and model failures are retried locally in gateway/sub-agent
+  code without spending a coordinator invocation or verifier call.
 - A specialist retry invalidates and reruns Policy because Policy depends on all
   specialist results.
 - Retry loops are bounded by both per-actor and workflow-wide limits.
@@ -62,14 +62,18 @@ This module is the stable boundary shared by all team members.
 
 - `case_id`: correlation identifier.
 - `actor`: target role.
-- `attempt`: one-based attempt number for that actor.
+- `invocation`: one-based total call number for that actor.
+- `context_version`: version of the upstream dependency snapshot.
+- `retry_count_for_context`: retry number for the same snapshot; zero for the
+  first call and for a recomputation after dependencies change.
 - `case`: original case payload.
 - `context`: a scoped, serializable snapshot of successful upstream results.
 - `feedback`: the most recent verifier feedback for this actor, or `None`.
 
 `AgentResult` contains:
 
-- `actor` and `attempt` matching the task.
+- `actor`, `invocation`, `context_version`, and `retry_count_for_context`
+  matching the task.
 - `status`: `completed` or `failed`.
 - A role-specific typed payload when completed. `OrderItemPayload`,
   `PaymentPayload`, `ShipmentPayload`, and `PolicyPayload` prevent arbitrary
@@ -84,6 +88,10 @@ and evidence-backed observations. They do not make the final policy decision.
 `PolicyPayload` contains the semantic fields needed in the final answer:
 assessment, optional claim assessments, root cause analysis, data conflicts,
 financial resolution, and resolution actions.
+
+Each tool-call summary records its local attempt count and final status. Local
+retry details are observable to coordinator after the agent returns, but the
+coordinator does not execute those retries.
 
 `VerificationPackage` contains:
 
@@ -116,6 +124,8 @@ events, and retry limits. It does not perform domain reasoning.
 - Current candidate output.
 - Verification history.
 - Workflow round count.
+- Agent invocation count, dependency `context_version`, and same-context retry
+  count as separate values.
 
 Unexpected exceptions from an agent callable are normalized into a failed
 `AgentResult`; this lets the verifier see the failed actor and stage instead of
@@ -151,10 +161,14 @@ missing; it must not silently substitute fake agents.
 11. On `failed`, invalid feedback, or exhausted limits, raise a structured
     coordinator exception. Do not manufacture an output.
 
-Before invoking Verifier, coordinator may directly retry an allowlisted
-transient failure such as `MCP_TIMEOUT` or `CONNECTION_RESET`. This uses the same
-per-actor attempt budget and is recorded in state and trace. Permanent,
-semantic, or unknown failures remain visible to Verifier.
+Before returning an `AgentResult`, gateway/sub-agent code locally retries
+allowlisted transient tool failures. Coordinator does not rerun the whole agent
+for `MCP_TIMEOUT`, `CONNECTION_RESET`, `RATE_LIMITED`, or `HTTP_5XX`. Sub-agent
+code may perform one deterministic repair when a model response is invalid.
+
+Coordinator only performs operational recovery when the agent task itself
+raises, times out, crashes, or returns no result. Permanent, semantic, or
+unknown completed-agent failures remain visible to Verifier.
 
 Payment and Shipment run concurrently only after Order/Item discovery, so each
 receives a stable identifier set. Retries are sequential so each verification
@@ -197,24 +211,36 @@ request a targeted correction.
 
 Defaults:
 
-- Maximum attempts per actor: `2` total, including the first attempt.
+- Maximum local attempts for one tool/model operation: `2`, owned by the
+  gateway or sub-agent implementation.
+- Maximum coordinator recovery attempts for one agent task and context version:
+  `1` retry after the initial invocation.
+- Maximum semantic retries for one actor and context version: `1`.
 - Maximum verification rounds: `5`.
 - Valid retry targets: `order_item`, `payment`, `shipment`, and `policy`.
 - Verifier itself is not a retry target in the initial implementation.
-- Direct coordinator retry is restricted to the allowlisted transient codes
-  `MCP_TIMEOUT` and `CONNECTION_RESET`.
+- Coordinator operational recovery is restricted to `AGENT_TIMEOUT`,
+  `AGENT_CRASHED`, and `AGENT_NO_RESPONSE`.
 
-There are two retry paths:
+There are three retry paths with exactly one owner per failure class:
 
-1. Coordinator operational retry for an allowlisted transient agent failure.
-2. Verifier-directed retry for semantic, evidence, scope, or consistency errors.
+1. Gateway/sub-agent local retry for `MCP_TIMEOUT`, `CONNECTION_RESET`,
+   `RATE_LIMITED`, `HTTP_5XX`, and one invalid-model-response repair.
+2. Coordinator task recovery for `AGENT_TIMEOUT`, `AGENT_CRASHED`, or
+   `AGENT_NO_RESPONSE`.
+3. Verifier-directed retry for semantic, evidence, scope, or consistency errors;
+   coordinator validates the report and performs the invocation.
+
+Retry policies must not stack for the same error code. For example, an MCP
+timeout exhausted by sub-agent code is returned as `MCP_TIMEOUT_EXHAUSTED` and
+is not automatically retried again by coordinator.
 
 A retry request is accepted only when:
 
 - Verdict is `retry_required`.
 - `retryable` is `true`.
 - `target_actor` is valid.
-- That actor has remaining attempts.
+- That actor has remaining same-context semantic retry allowance.
 - The workflow has remaining verification rounds.
 
 Retrying a specialist invalidates the active Policy result even if the specialist
@@ -222,6 +248,11 @@ fails again. Retrying Order/Item also invalidates and reruns Payment and Shipmen
 because their inputs may have changed. Policy runs again only after all
 specialists have active completed results. Retrying Policy preserves specialist
 results.
+
+An invocation caused by changed upstream data is a recomputation, not a retry.
+It increments `agent_invocation` and `context_version`, but resets the
+same-context retry count. This prevents a correct Policy agent from losing its
+retry allowance merely because Payment or Shipment produced a new result.
 
 ## Error handling
 
@@ -238,6 +269,14 @@ Coordinator exceptions use stable error codes for tests and integration:
 
 Error messages may aid developers but routing logic must use codes, not parse
 free-form text.
+
+The stable operational codes are owned as follows:
+
+- Gateway/sub-agent: `MCP_TIMEOUT`, `CONNECTION_RESET`, `RATE_LIMITED`,
+  `HTTP_5XX`, `INVALID_MODEL_RESPONSE`.
+- Coordinator: `AGENT_TIMEOUT`, `AGENT_CRASHED`, `AGENT_NO_RESPONSE`.
+- Verifier feedback: domain-specific semantic codes such as
+  `MISSING_EVIDENCE`, `WRONG_ENTITY_SCOPE`, or `POLICY_RULE_MISAPPLIED`.
 
 ## Trace behavior
 
@@ -264,13 +303,18 @@ Required cases:
 - Order/Item completes before Payment and Shipment receive their tasks.
 - Payment and Shipment receive the normalized entity context from Order/Item.
 - Verifier sees a failed specialist attempt in its package.
-- Allowlisted transient failures retry without a verifier round.
+- Allowlisted MCP/model failures retry inside sub-agent code without another
+  coordinator invocation or verifier round.
+- An exhausted local MCP retry does not trigger an automatic coordinator retry.
+- Agent task timeout/crash/no-response triggers bounded coordinator recovery.
 - Non-allowlisted failures remain visible to Verifier.
 - Verifier retries Payment once and the second result replaces only the active
   Payment result while history retains both attempts.
 - A specialist retry causes Policy to rerun with the updated context.
 - An Order/Item retry invalidates Payment, Shipment, and Policy.
 - A Policy retry does not rerun specialists.
+- Policy recomputation after an upstream context change does not consume its
+  same-context semantic retry allowance.
 - Invalid and non-retryable verifier feedback is rejected.
 - Per-actor and global verification limits stop loops deterministically.
 - Unexpected agent exceptions become structured failed results.
