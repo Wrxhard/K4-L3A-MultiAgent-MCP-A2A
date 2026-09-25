@@ -25,7 +25,13 @@ class EvidenceGateway:
     async def call(self, tool_name: str, *, case_id: str, **arguments: str) -> dict[str, Any]:
         payload = {"case_id": case_id, **arguments}
         result = await self._session.call_tool(tool_name, arguments=payload)
-        if result.isError:
+        # MCP uses camelCase on the wire but exposes snake_case Pydantic fields.
+        # Keep the legacy alias fallback so the adapter remains compatible with
+        # older SDK result objects and lightweight test doubles.
+        is_error = getattr(result, "is_error", None)
+        if is_error is None:
+            is_error = getattr(result, "isError", False)
+        if is_error:
             message = " ".join(
                 block.text for block in result.content if getattr(block, "text", None)
             )
@@ -39,9 +45,9 @@ class EvidenceGateway:
                 message or "unknown error",
                 not_found=not_found,
             )
-        evidence = getattr(result, "structuredContent", None)
+        evidence = getattr(result, "structured_content", None)
         if evidence is None:
-            evidence = getattr(result, "structured_content", None)
+            evidence = getattr(result, "structuredContent", None)
         if evidence is None:
             text_blocks = [block.text for block in result.content if getattr(block, "text", None)]
             if len(text_blocks) != 1:
