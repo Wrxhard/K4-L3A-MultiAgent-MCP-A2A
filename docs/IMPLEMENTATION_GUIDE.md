@@ -211,6 +211,14 @@ Model events dùng `task_assigned` và `handoff` với actor `semantic-adjudicat
 `independent-critic`. Trace chỉ ghi model ID/version, decision code và các evidence
 refs thực sự hỗ trợ artifact; không ghi prompt, completion hoặc chain-of-thought.
 
+Model endpoint dùng OpenAI-compatible API. `QWEN_API_URL` và `PHI_API_URL` cho phép
+serve hai model bằng hai process; nếu để trống, cả hai kế thừa `MODEL_API_URL`.
+`QWEN_MODEL_ID` và `PHI_MODEL_ID` mặc định lần lượt là `Qwen/Qwen3-4B` và
+`microsoft/Phi-4-mini-instruct`. Endpoint tương ứng trống kích hoạt deterministic fallback ngay,
+không chờ network timeout. Mỗi model response sai contract có tối đa một repair attempt.
+Phi chỉ trả allowlisted error codes/fields; nếu reject, Qwen nhận error codes trong đúng
+một revision task rồi final verifier tiếp quản.
+
 ## 7. Test strategy
 
 ### Unit tests cho specialist

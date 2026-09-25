@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 from .agents import (
+    PHI_MODEL_ID,
     QWEN_MODEL_ID,
     Gateway,
     adjudicate,
     build_route_plan,
     build_rules_draft,
+    critique,
     draft_to_output,
     generate_candidates,
     investigate_order_items,
@@ -15,6 +18,7 @@ from .agents import (
     investigate_policy,
     investigate_shipment,
     make_adjudicator_task,
+    make_critic_task,
     make_order_item_task,
     make_payment_task,
     make_policy_task,
@@ -22,6 +26,7 @@ from .agents import (
     normalize_case,
     verify_draft,
 )
+from .domain import CriticVerdict
 from .evidence import (
     PAYMENT_AGENT,
     POLICY_AGENT,
@@ -29,7 +34,11 @@ from .evidence import (
     EvidenceRegistry,
     ToolCatalog,
 )
-from .models import StructuredModelClient, build_adjudication_context
+from .models import (
+    StructuredModelClient,
+    build_adjudication_context,
+    build_critic_context,
+)
 from .orchestration import CaseTrace, TraceSink
 
 
@@ -39,6 +48,8 @@ async def solve_case(
     trace: TraceSink,
     adjudicator_client: StructuredModelClient | None = None,
     adjudicator_model_id: str = QWEN_MODEL_ID,
+    critic_client: StructuredModelClient | None = None,
+    critic_model_id: str = PHI_MODEL_ID,
 ) -> dict[str, Any]:
     """Run the deterministic specialist workflow and build a verified case output."""
     normalized = normalize_case(case)
@@ -152,6 +163,79 @@ async def solve_case(
         adjudication.decision,
         adjudication_context.alias_to_evidence_ref,
     )
+    preverification = verify_draft(
+        draft,
+        expected_case_id=normalized.case_id,
+        expected_claim_ids=tuple(claim.claim_id for claim in normalized.claims),
+        registry=registry,
+    )
+    critic_error_map = {
+        "INVALID_EVIDENCE_REFS": "MISSING_REQUIRED_EVIDENCE",
+        "CLAIM_EVIDENCE_OUTSIDE_OUTPUT": "CLAIM_VERDICT_UNSUPPORTED",
+        "CLAIM_SET_MISMATCH": "CLAIM_VERDICT_UNSUPPORTED",
+        "REFUND_TOTAL_MISMATCH": "POLICY_CONFLICT",
+    }
+    critic_context = build_critic_context(
+        draft,
+        adjudication_context,
+        deterministic_error_codes=tuple(
+            critic_error_map[code]
+            for code in preverification.error_codes
+            if code in critic_error_map
+        ),
+    )
+    critic_task = make_critic_task(normalized)
+    lifecycle.task_assigned(critic_task)
+    critique_result = await critique(
+        case_id=normalized.case_id,
+        context=critic_context,
+        client=critic_client,
+        model_id=critic_model_id,
+    )
+    lifecycle.model_handoff(
+        task_id=critic_task.task_id,
+        target="coordinator",
+        model_id=critic_model_id,
+        decision_code=critique_result.decision_code,
+        evidence_refs=draft.evidence_refs,
+        attempts=critique_result.attempts,
+    )
+    if critique_result.report.verdict is CriticVerdict.REJECT:
+        revision_task = make_adjudicator_task(normalized, attempt=2)
+        lifecycle.task_assigned(revision_task)
+        revision = await adjudicate(
+            case_id=normalized.case_id,
+            candidates=candidates,
+            context=adjudication_context,
+            client=adjudicator_client,
+            model_id=adjudicator_model_id,
+            revision_feedback=critique_result.report.error_codes,
+        )
+        lifecycle.model_handoff(
+            task_id=revision_task.task_id,
+            target="output-builder",
+            model_id=adjudicator_model_id,
+            decision_code=revision.decision_code,
+            evidence_refs=revision.evidence_refs,
+            attempts=revision.attempts,
+        )
+        draft = build_rules_draft(
+            normalized,
+            tuple(reports),
+            candidates,
+            revision.decision,
+            adjudication_context.alias_to_evidence_ref,
+        )
+        cap = critique_result.report.recommended_confidence_cap
+        if cap is not None:
+            draft = replace(
+                draft,
+                confidence=min(draft.confidence, cap),
+                claim_assessments=tuple(
+                    replace(item, confidence=min(item.confidence, cap))
+                    for item in draft.claim_assessments
+                ),
+            )
     verification = verify_draft(
         draft,
         expected_case_id=normalized.case_id,

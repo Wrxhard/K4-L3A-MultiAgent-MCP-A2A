@@ -41,9 +41,14 @@ async def _run(root: Path) -> None:
         stale.unlink()
     trace_path.unlink(missing_ok=True)
     trace = TraceWriter(trace_path, contracts)
-    model_client = (
-        OpenAICompatibleModelClient(settings.model_api_url, settings.model_api_key)
-        if settings.model_api_url
+    qwen_client = (
+        OpenAICompatibleModelClient(settings.qwen_api_url, settings.model_api_key)
+        if settings.qwen_api_url
+        else None
+    )
+    phi_client = (
+        OpenAICompatibleModelClient(settings.phi_api_url, settings.model_api_key)
+        if settings.phi_api_url
         else None
     )
 
@@ -58,8 +63,10 @@ async def _run(root: Path) -> None:
                 case,
                 gateway,
                 trace,
-                adjudicator_client=model_client,
+                adjudicator_client=qwen_client,
                 adjudicator_model_id=settings.qwen_model_id,
+                critic_client=phi_client,
+                critic_model_id=settings.phi_model_id,
             )
             contracts.validate_output(output, f"outputs/{case_id}.json")
             if output.get("case_id") != case_id:

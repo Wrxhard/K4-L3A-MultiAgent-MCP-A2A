@@ -117,12 +117,24 @@ def make_policy_task(case: NormalizedCase) -> AgentTask:
     )
 
 
-def make_adjudicator_task(case: NormalizedCase) -> AgentTask:
+def make_adjudicator_task(case: NormalizedCase, *, attempt: int = 1) -> AgentTask:
     return AgentTask(
-        task_id=f"{case.case_id}-semantic-adjudicator-1",
+        task_id=f"{case.case_id}-semantic-adjudicator-{attempt}",
         case_id=case.case_id,
         actor="semantic-adjudicator",
         objective="Select one bounded semantic decision from verified candidates",
+        entity_ids=(),
+        required_fact_codes=(),
+        attempt=attempt,
+    )
+
+
+def make_critic_task(case: NormalizedCase) -> AgentTask:
+    return AgentTask(
+        task_id=f"{case.case_id}-independent-critic-1",
+        case_id=case.case_id,
+        actor="independent-critic",
+        objective="Challenge semantic, policy, evidence, and calibration consistency",
         entity_ids=(),
         required_fact_codes=(),
     )

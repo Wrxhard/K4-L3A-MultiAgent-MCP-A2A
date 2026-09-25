@@ -207,3 +207,20 @@ def test_constraint_violations_have_specific_fallback_code() -> None:
     )
     assert result.used_fallback
     assert result.decision_code == "ADJUDICATOR_CONSTRAINT_VIOLATION"
+
+
+def test_revision_feedback_is_bounded_to_error_codes() -> None:
+    case, candidates, context = fixtures()
+    client = FakeModelClient([valid_response()])
+    asyncio.run(
+        adjudicate(
+            case_id=case.case_id,
+            candidates=candidates,
+            context=context,
+            client=client,
+            revision_feedback=("CONFIDENCE_TOO_HIGH",),
+        )
+    )
+    assert client.calls[0]["payload"]["revision_feedback"] == [
+        "CONFIDENCE_TOO_HIGH"
+    ]

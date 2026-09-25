@@ -174,11 +174,14 @@ async def adjudicate(
     context: AdjudicationContext,
     client: StructuredModelClient | None,
     model_id: str = QWEN_MODEL_ID,
+    revision_feedback: tuple[str, ...] = (),
 ) -> AdjudicationResult:
     fallback_code = "ADJUDICATOR_FALLBACK"
     if client is not None:
         for attempt in (1, 2):
             payload = dict(context.payload)
+            if revision_feedback:
+                payload["revision_feedback"] = list(revision_feedback)
             if attempt == 2:
                 payload["repair_instruction"] = (
                     "Previous response violated the contract. Return only a corrected JSON object."

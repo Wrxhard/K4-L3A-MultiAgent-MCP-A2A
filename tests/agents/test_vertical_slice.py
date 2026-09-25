@@ -139,6 +139,17 @@ class ValidAdjudicatorClient:
         }
 
 
+class RejectingCriticClient:
+    async def generate_json(self, **request: Any) -> dict[str, Any]:
+        del request
+        return {
+            "verdict": "reject",
+            "error_codes": ["CONFIDENCE_TOO_HIGH"],
+            "challenged_fields": ["assessment.confidence"],
+            "recommended_confidence_cap": 0.4,
+        }
+
+
 def envelope(ref: str, domain: str, data: object, hash_character: str) -> dict[str, Any]:
     return {
         "schema_version": "day09-mcp-evidence-v1",
@@ -256,6 +267,8 @@ def test_solve_case_runs_end_to_end_with_fake_boundaries() -> None:
         "handoff",
         "task_assigned",
         "handoff",
+        "task_assigned",
+        "handoff",
         "verification_completed",
         "case_finalized",
     ]
@@ -326,3 +339,31 @@ def test_solve_case_uses_valid_adjudicator_result() -> None:
     assert output["assessment"]["primary_issue"] == "canceled_order_paid"
     assert model_handoff["decision_code"] == "ADJUDICATION_ACCEPTED"
     assert model_handoff["attributes"]["attempts"] == 1
+
+
+def test_critic_reject_triggers_exactly_one_bounded_revision() -> None:
+    sink = FakeTraceSink()
+    output = asyncio.run(
+        solve_case(
+            input_case(),
+            FakeGateway(),
+            sink,
+            adjudicator_client=ValidAdjudicatorClient(),
+            critic_client=RejectingCriticClient(),
+        )
+    )
+    semantic_handoffs = [
+        event
+        for event in sink.events
+        if event.get("actor") == "semantic-adjudicator"
+        and event["event_type"] == "handoff"
+    ]
+    critic_handoffs = [
+        event
+        for event in sink.events
+        if event.get("actor") == "independent-critic"
+        and event["event_type"] == "handoff"
+    ]
+    assert len(semantic_handoffs) == 2
+    assert len(critic_handoffs) == 1
+    assert output["assessment"]["confidence"] == 0.4
