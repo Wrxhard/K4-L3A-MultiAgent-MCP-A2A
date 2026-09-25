@@ -70,6 +70,8 @@ class CoordinatorContext(TypedDict):
 
 
 class Coordinator:
+    _MAX_VERIFICATION_ROUNDS = 5
+
     def __init__(self) -> None:
         builder = StateGraph(CoordinatorGraphState, context_schema=CoordinatorContext)
         builder.add_node("order_item", self._order_item_node)
@@ -136,12 +138,10 @@ class Coordinator:
         case_state = state["case_state"]
         if not self._completed(case_state, "order_item"):
             return {"case_state": case_state}
-        payment, shipment = await asyncio.gather(
-            self._call_actor("payment", case_state, runtime),
-            self._call_actor("shipment", case_state, runtime),
+        await asyncio.gather(
+            self._invoke_actor("payment", case_state, runtime),
+            self._invoke_actor("shipment", case_state, runtime),
         )
-        self._record_result(case_state, payment, runtime.context["trace"])
-        self._record_result(case_state, shipment, runtime.context["trace"])
         return {"case_state": case_state}
 
     async def _policy_node(
@@ -168,9 +168,39 @@ class Coordinator:
         runtime: Runtime[CoordinatorContext],
     ) -> dict[str, Any]:
         case_state = state["case_state"]
+        if len(case_state.verification_history) >= self._MAX_VERIFICATION_ROUNDS:
+            return {
+                "case_state": case_state,
+                "latest_report": state.get("latest_report"),
+                "terminal_error": CoordinatorError(
+                    "VERIFICATION_LIMIT_EXCEEDED",
+                    "maximum verification rounds exceeded",
+                ),
+            }
         package = self._verification_package(case_state)
         report = await runtime.context["registry"].verifier.ainvoke(package)
-        validate_verification_report(report)
+        try:
+            validate_verification_report(report)
+        except (AttributeError, TypeError, ValueError):
+            if (
+                isinstance(report, VerificationReport)
+                and report.verdict == "retry_required"
+                and not report.retryable
+            ):
+                code = "RETRY_NOT_ALLOWED"
+            elif (
+                isinstance(report, VerificationReport)
+                and report.verdict == "retry_required"
+                and report.target_actor not in ACTORS
+            ):
+                code = "INVALID_RETRY_TARGET"
+            else:
+                code = "INVALID_VERIFIER_REPORT"
+            return {
+                "case_state": case_state,
+                "latest_report": None,
+                "terminal_error": CoordinatorError(code, "verifier returned an invalid report"),
+            }
         case_state.verification_history.append(report)
         runtime.context["trace"].emit(
             case_id=case_state.case_id,
@@ -199,13 +229,58 @@ class Coordinator:
     async def _retry_target_node(
         self,
         state: CoordinatorGraphState,
+        runtime: Runtime[CoordinatorContext],
     ) -> dict[str, Any]:
-        return {
-            "case_state": state["case_state"],
-            "terminal_error": CoordinatorError(
-                "RETRY_NOT_ALLOWED", "retry routing is not available"
-            ),
-        }
+        case_state = state["case_state"]
+        report = state.get("latest_report")
+        if report is None or report.verdict != "retry_required":
+            return self._retry_error(case_state, "INVALID_VERIFIER_REPORT")
+        if not report.retryable:
+            return self._retry_error(case_state, "RETRY_NOT_ALLOWED")
+        if report.target_actor not in ACTORS:
+            return self._retry_error(case_state, "INVALID_RETRY_TARGET")
+        target: Actor = report.target_actor
+        if case_state.retry_counts[target] >= 1:
+            return self._retry_error(case_state, "RETRY_LIMIT_EXCEEDED")
+
+        case_state.feedback[target] = AgentFeedback(
+            error_code=report.error_code or "VERIFICATION_FAILED",
+            message=report.feedback or "Recheck the assigned result",
+        )
+        case_state.retry_counts[target] += 1
+        case_state.active_results.pop(target, None)
+        case_state.candidate_output = None
+        runtime.context["trace"].emit(
+            case_id=case_state.case_id,
+            event_type="retry_scheduled",
+            actor="coordinator",
+            target=target,
+            decision_code=report.error_code or "VERIFICATION_FAILED",
+            attributes={
+                "context_version": case_state.context_versions[target],
+                "retry_count": case_state.retry_counts[target],
+            },
+        )
+
+        if target == "order_item":
+            self._invalidate(case_state, "payment", "shipment", "policy")
+            await self._invoke_actor("order_item", case_state, runtime)
+            if self._completed(case_state, "order_item"):
+                await asyncio.gather(
+                    self._invoke_actor("payment", case_state, runtime),
+                    self._invoke_actor("shipment", case_state, runtime),
+                )
+                if all(self._completed(case_state, actor) for actor in ACTORS[:3]):
+                    await self._invoke_actor("policy", case_state, runtime)
+        elif target in ("payment", "shipment"):
+            self._invalidate(case_state, "policy")
+            await self._invoke_actor(target, case_state, runtime)
+            if self._completed(case_state, target):
+                await self._invoke_actor("policy", case_state, runtime)
+        else:
+            await self._invoke_actor("policy", case_state, runtime)
+
+        return {"case_state": case_state, "terminal_error": None}
 
     async def _fail_node(self, state: CoordinatorGraphState) -> dict[str, Any]:
         return {
@@ -234,9 +309,23 @@ class Coordinator:
         case_state: CaseState,
         runtime: Runtime[CoordinatorContext],
     ) -> AgentResult:
-        result = await self._call_actor(actor, case_state, runtime)
-        self._record_result(case_state, result, runtime.context["trace"])
-        return result
+        try:
+            while True:
+                result = await self._call_actor(actor, case_state, runtime)
+                self._record_result(case_state, result, runtime.context["trace"])
+                if result.status == "completed":
+                    return result
+                if result.error_code not in {
+                    "AGENT_CRASHED",
+                    "AGENT_TIMEOUT",
+                    "AGENT_NO_RESPONSE",
+                }:
+                    return result
+                if case_state.retry_counts[actor] >= 1:
+                    return result
+                case_state.retry_counts[actor] += 1
+        finally:
+            case_state.feedback.pop(actor, None)
 
     async def _call_actor(
         self,
@@ -267,9 +356,55 @@ class Coordinator:
                 "retry_count": task.retry_count_for_context,
             },
         )
-        result = await runtime.context["registry"].for_actor(actor).ainvoke(task)
-        validate_agent_result(task, result)
-        return result
+        try:
+            result = await runtime.context["registry"].for_actor(actor).ainvoke(task)
+            if result is None:
+                return self._failed_invocation(task, "AGENT_NO_RESPONSE")
+            validate_agent_result(task, result)
+            return result
+        except TimeoutError:
+            return self._failed_invocation(task, "AGENT_TIMEOUT")
+        except Exception:
+            return self._failed_invocation(task, "AGENT_CRASHED")
+
+    @staticmethod
+    def _failed_invocation(task: AgentTask, error_code: str) -> AgentResult:
+        details = {
+            "AGENT_TIMEOUT": "Agent invocation timed out",
+            "AGENT_NO_RESPONSE": "Agent returned no response",
+            "AGENT_CRASHED": "Agent invocation failed",
+        }
+        return AgentResult.failed(
+            actor=task.actor,
+            invocation=task.invocation,
+            context_version=task.context_version,
+            retry_count_for_context=task.retry_count_for_context,
+            error_code=error_code,
+            failed_stage="agent_invocation",
+            retryable=True,
+            safe_detail=details[error_code],
+        )
+
+    @staticmethod
+    def _retry_error(case_state: CaseState, code: str) -> dict[str, Any]:
+        messages = {
+            "INVALID_VERIFIER_REPORT": "retry requested without a valid report",
+            "RETRY_NOT_ALLOWED": "verifier marked the retry as not allowed",
+            "INVALID_RETRY_TARGET": "verifier selected an invalid retry target",
+            "RETRY_LIMIT_EXCEEDED": "same-context retry limit exceeded",
+        }
+        return {
+            "case_state": case_state,
+            "terminal_error": CoordinatorError(code, messages[code]),
+        }
+
+    @staticmethod
+    def _invalidate(case_state: CaseState, *actors: Actor) -> None:
+        for actor in actors:
+            case_state.active_results.pop(actor, None)
+            case_state.feedback.pop(actor, None)
+            case_state.context_versions[actor] += 1
+            case_state.retry_counts[actor] = 0
 
     @staticmethod
     def _record_result(case_state: CaseState, result: AgentResult, trace: TraceSink) -> None:
